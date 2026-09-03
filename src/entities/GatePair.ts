@@ -37,12 +37,14 @@ export class GatePair {
   readonly group = new THREE.Group();
   readonly z: number;
   passed = false;
+  readonly tickable: boolean;
   private halves: Half[] = [];
-  private tickable: boolean;
   private tickPerHit: number;
-  private tickAccum = 0;
+  private accum: number[] = [];
+  private readonly cfg: GameConfig;
 
   constructor(seg: Segment, cfg: GameConfig) {
+    this.cfg = cfg;
     this.z = seg.z;
     this.tickable = !!seg.tickable;
     this.tickPerHit = seg.tickPerHit ?? 1;
@@ -54,6 +56,7 @@ export class GatePair {
     // and "right" at world -X (screen-right) to keep JSON intuitive.
     if (seg.left) this.halves.push(this.makeHalf(seg.left, (mid + maxX) / 2, halfW));
     if (seg.right) this.halves.push(this.makeHalf(seg.right, (minX + mid) / 2, halfW));
+    this.accum = this.halves.map(() => 0);
   }
 
   private makeHalf(side: GateSide, centerX: number, halfWidth: number): Half {
@@ -101,20 +104,49 @@ export class GatePair {
     h.plate.set(`${OP_SYMBOL[h.side.op]}${h.side.value}`);
   }
 
-  /** Called each tick while the crowd is in range (only matters if tickable). */
-  tick(dt: number): void {
-    if (!this.tickable || this.passed) return;
-    this.tickAccum += dt;
-    while (this.tickAccum >= 0.16) {
-      this.tickAccum -= 0.16;
-      for (const h of this.halves) {
-        if (h.side.op === 'add') h.side.value = Math.min(99, h.side.value + this.tickPerHit);
-        else if (h.side.op === 'mul') h.side.value = Math.min(6, h.side.value + this.tickPerHit);
-        // sub/div decay toward harmless, but never past 1: ÷0 is a no-op, ÷1 is the real floor
-        else h.side.value = Math.max(1, h.side.value - this.tickPerHit);
-        this.refreshPlate(h);
-      }
+  get halfCount(): number {
+    return this.halves.length;
+  }
+
+  /** Where half `i` sits, so the shooter can aim at one door instead of the pair. */
+  halfTarget(i: number): { x: number; halfWidth: number } {
+    const h = this.halves[i];
+    return { x: h.centerX, halfWidth: h.halfWidth };
+  }
+
+  /** Index of the half nearest `centerX` among those the firing lane overlaps, else -1. */
+  overlappingHalf(centerX: number, laneHalf: number): number {
+    let best = -1;
+    let bestD = Infinity;
+    for (let i = 0; i < this.halves.length; i++) {
+      const h = this.halves[i];
+      const d = Math.abs(centerX - h.centerX);
+      if (d > laneHalf + h.halfWidth || d >= bestD) continue;
+      bestD = d;
+      best = i;
     }
+    return best;
+  }
+
+  /** Bullets landing on one door only: every damagePerTick nudges that half's value. */
+  hit(i: number, damage: number): void {
+    if (!this.tickable || this.passed) return;
+    const h = this.halves[i];
+    if (!h) return;
+    const g = this.cfg.gates;
+    const per = g.damagePerTick;
+    if (per <= 0) return; // a free tick would spin the loop below forever
+    this.accum[i] += damage;
+    let ticked = false;
+    while (this.accum[i] >= per) {
+      this.accum[i] -= per;
+      if (h.side.op === 'add') h.side.value = Math.min(g.addCap, h.side.value + this.tickPerHit);
+      else if (h.side.op === 'mul') h.side.value = Math.min(g.mulCap, h.side.value + this.tickPerHit);
+      // sub/div decay toward harmless, but never past the floor: ÷0 is a no-op, ÷1 is the real floor
+      else h.side.value = Math.max(g.decayFloor, h.side.value - this.tickPerHit);
+      ticked = true;
+    }
+    if (ticked) this.refreshPlate(h);
   }
 
   /** Apply the side the centroid sits on; shatter the other. Returns the math result. */

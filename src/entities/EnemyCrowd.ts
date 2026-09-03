@@ -5,7 +5,6 @@ import { phyllotaxis, type Vec2 } from '../util/MathUtil';
 import type { GameConfig, Segment } from '../data/types';
 
 const ENEMY_COLOR = 0xff8a3d;
-const UNIT_HP = 3; // each orange takes this much damage to drop
 
 // Mirror of the player crowd: a count that auto-fires at the player. Resolved as
 // a DPS race in the overlap lane (see CombatSystem).
@@ -33,7 +32,7 @@ export class EnemyCrowd {
     this.z = seg.z;
     this.count = seg.count ?? 10;
     this.fireRate = seg.fireRate ?? 4;
-    this.hp = this.count * UNIT_HP;
+    this.hp = this.count * cfg.combat.enemyUnitHp;
 
     this.cap = Math.min(this.count, 80);
     this.instancer = new UnitInstancer(Math.max(1, this.cap), ENEMY_COLOR, cfg.crowd.unitRadius);
@@ -65,13 +64,13 @@ export class EnemyCrowd {
     if (this.count <= 0) return 0;
     const c = this.cfg.combat;
     // enemies hit a bit softer than the player per unit
-    return Math.pow(this.count, c.dpsExponent) * (c.perUnitDamage * 0.85) * this.fireRate;
+    return Math.pow(this.count, c.dpsExponent) * (c.perUnitDamage * c.enemyPerUnitDamageFactor) * this.fireRate;
   }
 
   takeDamage(d: number): void {
     if (!this.alive) return;
     this.hp -= d;
-    this.count = Math.max(0, Math.ceil(this.hp / UNIT_HP));
+    this.count = Math.max(0, Math.ceil(this.hp / this.cfg.combat.enemyUnitHp));
     if (this.hp <= 0) {
       this.count = 0;
       this.alive = false;

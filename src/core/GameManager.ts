@@ -21,17 +21,17 @@ const BASE_FOV = 56;
 const CAM_BACK = 8.5;
 const CAM_HEIGHT = 6.2;
 const LOOK_AHEAD = 7;
-const BOSS_STANDOFF = 6.5;
 const AVAILABLE_LEVELS = 3;
 const INTERSTITIAL_EVERY = 2; // show an interstitial every N level completions
 
-type TargetKind = 'barricade' | 'enemy' | 'objective' | 'boss';
+type TargetKind = 'barricade' | 'enemy' | 'objective' | 'boss' | 'gate';
 interface Target {
   kind: TargetKind;
   dist: number;
   x: number;
   z: number;
-  ref: Barricade | EnemyCrowd | ObjectiveNode | Boss;
+  ref: Barricade | EnemyCrowd | ObjectiveNode | Boss | GatePair;
+  halfIdx?: number; // 'gate' only: which door the fire is landing on
 }
 
 export class GameManager {
@@ -42,6 +42,7 @@ export class GameManager {
 
   private cfg!: GameConfig;
   private level!: LevelDefinition;
+  private runSpeed = 0;
 
   private save = new SaveService();
   private audio = new AudioService();
@@ -142,8 +143,24 @@ export class GameManager {
     return `${import.meta.env.BASE_URL}levels/level_${String(wrapped).padStart(3, '0')}.json`;
   }
 
+  /** How many times the authored level list has been looped (endless mode). */
+  private wrapsFor(n: number): number {
+    // clamped: a corrupt save with currentLevel < 1 must never scale threats down
+    return Math.max(0, Math.floor((n - 1) / AVAILABLE_LEVELS));
+  }
+
+  /**
+   * Physical footprint of the formation, not the (much wider) firing lane.
+   * Shared by the barricade ram test and the boss sweep so both agree on how
+   * much space the crowd actually takes up.
+   */
+  private crowdHalf(): number {
+    return Math.max(0.3, this.cfg.crowd.formationSpacing * Math.sqrt(this.crowd.visibleCount) * 0.55);
+  }
+
   private async loadLevel(n: number): Promise<void> {
     this.level = await fetch(this.levelPath(n)).then((r) => r.json() as Promise<LevelDefinition>);
+    this.runSpeed = this.level.forwardSpeed + this.cfg.meta.wrapSpeedStep * this.wrapsFor(n);
     if (this.track) { this.scene.remove(this.track.group); this.track.dispose(); }
     this.track = new Track(this.cfg, this.level.length);
     this.scene.add(this.track.group);
@@ -176,7 +193,29 @@ export class GameManager {
     for (const seg of this.level.segments) this.spawnSegment(seg);
   }
 
-  private spawnSegment(seg: Segment): void {
+  /**
+   * Endless scaling: past the authored levels every wrap makes threats bigger and
+   * punishes harsher, while rewards (add/mul gates) stay authored so the balance
+   * curve tilts. Must copy: buildLevel re-reads `this.level` on every retry, so
+   * scaling in place would compound.
+   */
+  private scaleSegment(raw: Segment, wraps: number): Segment {
+    const f = 1 + this.cfg.meta.wrapDifficultyStep * wraps;
+    const seg: Segment = { ...raw };
+    if (seg.hp !== undefined) seg.hp = Math.round(seg.hp * f);
+    if (seg.count !== undefined) seg.count = Math.round(seg.count * f);
+    for (const key of ['left', 'right'] as const) {
+      const side = seg[key];
+      if (side && (side.op === 'sub' || side.op === 'div')) {
+        seg[key] = { op: side.op, value: Math.round(side.value * f) };
+      }
+    }
+    return seg;
+  }
+
+  private spawnSegment(raw: Segment): void {
+    const wraps = this.wrapsFor(this.save.get().currentLevel);
+    const seg = wraps > 0 ? this.scaleSegment(raw, wraps) : raw;
     switch (seg.type) {
       case 'gate_pair': {
         const g = new GatePair(seg, this.cfg);
@@ -185,7 +224,7 @@ export class GameManager {
         break;
       }
       case 'barricade': {
-        const b = new Barricade(seg);
+        const b = new Barricade(seg, this.cfg);
         this.scene.add(b.group);
         this.barricades.push(b);
         break;
@@ -247,10 +286,11 @@ export class GameManager {
     // rebuild for a clean slate
     this.buildLevel();
     const s = this.save.get();
-    const start = this.cfg.crowd.startingCount + s.upgrades.startingCrowd * 3;
+    const step = this.cfg.meta.upgradeSteps;
+    const start = this.cfg.crowd.startingCount + s.upgrades.startingCrowd * step.startingCrowd;
     this.crowd.reset(start);
-    this.crowd.damageMul = 1 + s.upgrades.bulletPower * 0.25;
-    this.crowd.fireRateMul = 1 + s.upgrades.fireRate * 0.2;
+    this.crowd.damageMul = 1 + s.upgrades.bulletPower * step.bulletPower;
+    this.crowd.fireRateMul = 1 + s.upgrades.fireRate * step.fireRate;
     this.peakCount = start;
     this.bullets.clear();
     this.enemyBullets.clear();
@@ -283,12 +323,12 @@ export class GameManager {
 
     // MOVEMENT (forward), unless locked in the boss standoff
     if (this.state === 'PLAYING') {
-      const speed = this.level.forwardSpeed;
-      this.crowd.advance(speed * dt);
+      this.crowd.advance(this.runSpeed * dt);
       if (this.crowd.centroid.x !== 0) this.hud.setHint(false);
       // enter boss standoff
-      if (this.boss && this.boss.alive && this.crowd.centroid.z >= this.boss.z - BOSS_STANDOFF) {
-        this.crowd.centroid.z = this.boss.z - BOSS_STANDOFF;
+      const standoff = this.cfg.boss.standoff;
+      if (this.boss && this.boss.alive && this.crowd.centroid.z >= this.boss.z - standoff) {
+        this.crowd.centroid.z = this.boss.z - standoff;
         this.state = 'BOSS';
         this.bossBarShown = true;
         this.hud.bossBar(true, 1);
@@ -301,9 +341,16 @@ export class GameManager {
     // COMBAT
     this.combat(dt);
     // GATES
-    this.gateSystem(dt);
+    this.gateSystem();
     // COLLISIONS (barricade ram, finish)
     this.collisionSystem();
+
+    // Boss chip: the standoff bleeds the crowd every frame, so out-waiting the
+    // sweep is never a strategy — you have to out-damage it.
+    if (this.state === 'BOSS' && this.boss && this.boss.alive) {
+      const b = this.cfg.boss;
+      this.crowd.damage(Math.max(b.chipMinUnitsPerSecond, this.crowd.count * b.chipFractionPerSecond) * dt);
+    }
 
     // bullets
     this.bullets.update(dt);
@@ -338,7 +385,8 @@ export class GameManager {
       const d = e.z - cz;
       if (d < -3 || d > c.engageRange) continue;
       if (!e.overlapsLane(cx, laneHalf)) continue;
-      const removed = this.crowd.damage(e.enemyDPS() * 0.5 * dt);
+      // enemy DPS is raw damage; playerUnitHp converts it into units removed
+      const removed = this.crowd.damage((e.enemyDPS() * c.enemyDamageFactor * dt) / c.playerUnitHp);
       firing.push(e);
       if (removed > 0) this.audio.play('hit');
     }
@@ -356,21 +404,27 @@ export class GameManager {
     const t = this.findTarget(cx, cz, laneHalf, c.engageRange);
     if (!t || dps <= 0) return;
 
-    const before = (t.ref as any).count ?? (t.ref as any).hp;
-    t.ref.takeDamage(dps * dt);
+    if (t.kind === 'gate') {
+      // shooting a tickable gate pumps the door you are aimed at, nothing else
+      (t.ref as GatePair).hit(t.halfIdx ?? 0, dps * dt);
+    } else {
+      const ref = t.ref as Barricade | EnemyCrowd | ObjectiveNode | Boss;
+      const before = (ref as any).count ?? (ref as any).hp;
+      ref.takeDamage(dps * dt);
 
-    // rewards / clears
-    if (t.kind === 'objective') {
-      const o = t.ref as ObjectiveNode;
-      if (o.cleared && o.reward > 0) {
-        this.crowd.add(o.reward);
-        this.popupWorld(`+${o.reward}`, '#5ce06a', o.x, 1.6, o.z);
-        this.audio.play('add');
-        o.cleared = false; // consume
+      // rewards / clears
+      if (t.kind === 'objective') {
+        const o = ref as ObjectiveNode;
+        if (o.cleared && o.reward > 0) {
+          this.crowd.add(o.reward);
+          this.popupWorld(`+${o.reward}`, '#5ce06a', o.x, 1.6, o.z);
+          this.audio.play('add');
+          o.cleared = false; // consume
+        }
+      } else if (t.kind === 'enemy') {
+        const e = ref as EnemyCrowd;
+        if (!e.alive && before > 0) this.audio.play('break');
       }
-    } else if (t.kind === 'enemy') {
-      const e = t.ref as EnemyCrowd;
-      if (!e.alive && before > 0) this.audio.play('break');
     }
 
     // visual tracers toward the target
@@ -385,12 +439,15 @@ export class GameManager {
 
   private findTarget(cx: number, cz: number, laneHalf: number, range: number): Target | null {
     let best: Target | null = null;
-    const consider = (kind: TargetKind, ref: Target['ref'], x: number, z: number, half: number, alive: boolean) => {
+    const consider = (
+      kind: TargetKind, ref: Target['ref'], x: number, z: number, half: number,
+      alive: boolean, halfIdx?: number,
+    ) => {
       if (!alive) return;
       const d = z - cz;
       if (d < -1 || d > range) return;
       if (Math.abs(cx - x) > laneHalf + half) return;
-      if (!best || d < best.dist) best = { kind, ref, dist: d, x, z };
+      if (!best || d < best.dist) best = { kind, ref, dist: d, x, z, halfIdx };
     };
     for (const b of this.barricades) consider('barricade', b, b.x, b.z, b.halfWidth, b.alive);
     for (const e of this.enemies) {
@@ -398,19 +455,23 @@ export class GameManager {
       consider('enemy', e, e.x, e.z, myHalf, e.alive);
     }
     for (const o of this.objectives) consider('objective', o, o.x, o.z, o.halfWidth, o.alive);
+    for (const g of this.gates) {
+      if (g.passed || !g.tickable) continue;
+      const h = g.overlappingHalf(cx, laneHalf);
+      if (h < 0) continue;
+      const half = g.halfTarget(h);
+      consider('gate', g, half.x, g.z, half.halfWidth, true, h);
+    }
     if (this.boss) consider('boss', this.boss, 0, this.boss.z, 1.4, this.boss.alive);
     return best;
   }
 
   // ---------------------------------------------------------------- gates
-  private gateSystem(dt: number): void {
+  private gateSystem(): void {
     const cz = this.crowd.centroid.z;
     const cx = this.crowd.centroid.x;
-    const range = this.cfg.combat.engageRange;
     for (const g of this.gates) {
       if (g.passed) continue;
-      const d = g.z - cz;
-      if (d <= range && d > -1) g.tick(dt);
       if (cz >= g.z) {
         const res = g.applyFor(cx, this.crowd.count);
         if (res) this.applyGate(res, cx, g.z);
@@ -447,8 +508,7 @@ export class GameManager {
     const cz = this.crowd.centroid.z;
     const cx = this.crowd.centroid.x;
 
-    // physical footprint of the formation, not the (much wider) firing lane
-    const crowdHalf = Math.max(0.3, this.cfg.crowd.formationSpacing * Math.sqrt(this.crowd.visibleCount) * 0.55);
+    const crowdHalf = this.crowdHalf();
 
     for (const b of this.barricades) {
       if (b.passed) continue;
@@ -491,7 +551,7 @@ export class GameManager {
     for (const o of this.objectives) o.update(dt, cam);
     if (this.finish) this.finish.update(dt, cam);
     if (this.boss) {
-      const frac = this.boss.update(dt, this.time, cam, this.crowd.centroid.x, this.crowd.laneHalf(), this.state === 'BOSS');
+      const frac = this.boss.update(dt, this.time, cam, this.crowd.centroid.x, this.crowdHalf(), this.state === 'BOSS');
       if (frac > 0 && this.state === 'BOSS') {
         const lost = this.crowd.kill(Math.ceil(this.crowd.count * frac));
         if (lost > 0) {
@@ -642,7 +702,7 @@ export class GameManager {
   }
 
   private revive(): void {
-    const amount = Math.max(10, Math.floor(this.peakCount * 0.35));
+    const amount = Math.max(10, Math.floor(this.peakCount * this.cfg.meta.reviveFraction));
     this.crowd.count = amount;
     this.hud.setCount(amount);
     this.hud.hideOverlay();
@@ -658,6 +718,7 @@ export class GameManager {
       z: this.crowd ? +this.crowd.centroid.z.toFixed(1) : 0,
       x: this.crowd ? +this.crowd.centroid.x.toFixed(2) : 0,
       bossHp: this.boss ? Math.ceil(this.boss.hp) : null,
+      runSpeed: +this.runSpeed.toFixed(2),
       coins: this.save.get().coins,
     };
   }

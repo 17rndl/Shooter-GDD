@@ -7,7 +7,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "balance": "node scripts/balance-sim.mjs"
   },
   "devDependencies": {
     "@types/three": "^0.170.0",

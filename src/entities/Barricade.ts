@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { NumberPlate } from '../util/Label';
-import type { Segment } from '../data/types';
+import type { GameConfig, Segment } from '../data/types';
 
 // A numbered wall. Shoot its HP to zero to pass free; ram it while HP>0 and the
 // crowd pays a unit penalty proportional to the HP that was left.
@@ -18,8 +18,10 @@ export class Barricade {
   private box: THREE.Mesh;
   private plate: NumberPlate;
   private breaking = -1;
+  private readonly ramFactor: number;
 
-  constructor(seg: Segment) {
+  constructor(seg: Segment, cfg?: GameConfig) {
+    this.ramFactor = cfg?.barricade?.ramFactor ?? 0.8;
     this.x = seg.x ?? 0;
     this.z = seg.z;
     const width = seg.width ?? 2.0;
@@ -69,7 +71,7 @@ export class Barricade {
 
   /** Units lost if the crowd rams it with HP remaining. */
   ramPenalty(): number {
-    return Math.ceil(this.hp * 0.8);
+    return Math.ceil(this.hp * this.ramFactor);
   }
 
   forceBreak(): void {

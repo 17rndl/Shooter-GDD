@@ -21,6 +21,31 @@ export interface GameConfig {
     laneWidthPerUnit: number;
     laneWidthMax: number;
     engageRange: number;
+    // damage → units conversion: `damage` of this size removes one unit
+    playerUnitHp: number;
+    enemyUnitHp: number;
+    enemyPerUnitDamageFactor: number;
+    enemyDamageFactor: number;
+  };
+  boss: {
+    standoff: number;
+    cooldown: number;
+    cooldownMin: number;
+    telegraphTime: number;
+    telegraphTimeMin: number;
+    hitFraction: number;
+    bandHalf: number;
+    firstTelegraphDelay: number;
+    chipFractionPerSecond: number;
+    chipMinUnitsPerSecond: number;
+  };
+  gates: { damagePerTick: number; mulCap: number; addCap: number; decayFloor: number };
+  barricade: { ramFactor: number };
+  meta: {
+    reviveFraction: number;
+    wrapDifficultyStep: number;
+    wrapSpeedStep: number;
+    upgradeSteps: { bulletPower: number; fireRate: number; startingCrowd: number };
   };
   economy: { coinPerUnit: number; upgradeCostBase: number; upgradeCostGrowth: number };
 }

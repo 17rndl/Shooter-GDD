@@ -15,7 +15,31 @@
     "bulletSpeed": 38.0,
     "laneWidthPerUnit": 0.05,
     "laneWidthMax": 4.0,
-    "engageRange": 22.0
+    "engageRange": 22.0,
+    "playerUnitHp": 3,
+    "enemyUnitHp": 3,
+    "enemyPerUnitDamageFactor": 0.85,
+    "enemyDamageFactor": 0.5
+  },
+  "boss": {
+    "standoff": 6.5,
+    "cooldown": 2.4,
+    "cooldownMin": 1.1,
+    "telegraphTime": 1.05,
+    "telegraphTimeMin": 0.6,
+    "hitFraction": 0.16,
+    "bandHalf": 1.5,
+    "firstTelegraphDelay": 1.5,
+    "chipFractionPerSecond": 0.01,
+    "chipMinUnitsPerSecond": 1
+  },
+  "gates": { "damagePerTick": 12, "mulCap": 4, "addCap": 99, "decayFloor": 1 },
+  "barricade": { "ramFactor": 0.8 },
+  "meta": {
+    "reviveFraction": 0.35,
+    "wrapDifficultyStep": 0.35,
+    "wrapSpeedStep": 0.5,
+    "upgradeSteps": { "bulletPower": 0.25, "fireRate": 0.2, "startingCrowd": 3 }
   },
   "economy": { "coinPerUnit": 2, "upgradeCostBase": 50, "upgradeCostGrowth": 1.35 }
 }

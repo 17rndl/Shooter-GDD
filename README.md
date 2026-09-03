@@ -36,6 +36,32 @@ npm run dev      # open the printed http://localhost:PORT
    persistent save (coins, upgrades, current level), interstitial hook every N clears. Shop is
    reachable from the menu, the reward screen, and the lose screen.
 
+### Balance pass (GDD §15) — verified by a checked-in simulator
+
+A 15-agent audit found the first cut *worked as software but not as a game*: enemies beat equal
+crowds (player units had 1 HP vs enemy 3), the boss never decided a level (its only attack was
+trivially dodgeable, so HP was just a timer), barricades died before contact, and tickable gates
+inflated for free on a wall-clock timer. The balance overhaul:
+
+- **Every balance number lives in `config.json`** — `combat.playerUnitHp/enemyUnitHp/...`, a
+  `boss` block (standoff, cooldown→cooldownMin and telegraph→telegraphMin *escalating with lost
+  HP*, hit fraction, band width, chip damage), `gates` (damage per tick, caps, floor),
+  `barricade.ramFactor`, `meta` (revive fraction, endless-wrap scaling, upgrade steps).
+- **Player units have HP** — the DPS race now favors the bigger side, per GDD §8.2.
+- **Boss standoff has pressure** — chip loss per second so time matters, random telegraph bands
+  you must *read*, cycle speed that ramps as the boss weakens, and a **proportional-overlap
+  sweep** (only the units under the band die) so big crowds can't fully dodge but steering
+  always matters.
+- **Tickable gates are bullet-driven** — the half you shoot is the half that ticks; the gate
+  competes for your fire like any target (the reference image's mechanic, with real agency).
+- **Endless wrap scales** — past the authored levels, threats grow `1 + 0.35·wraps` and the
+  track speeds up, so upgrades never make the loop strictly easier.
+- **`npm run balance`** runs `scripts/balance-sim.mjs`: it plays every level with a
+  best-path policy (good gates, dodge, shoot the good half) and a worst-path policy (bad gates,
+  fight everything, passive at the boss) using the game's exact formulas, and fails the build
+  if a best path can't beat the boss with margin or a worst path survives. Treat it as the
+  balance regression test — retune numbers until it passes.
+
 Plus juice (camera shake, FOV punch on big multiplies, pop-ups, zero-asset WebAudio SFX) and
 services behind interfaces with no-op stubs: `SaveService` (localStorage), `AudioService`,
 `IAdService` (`AdServiceStub` → swap in AppLovin MAX / AdMob later).
