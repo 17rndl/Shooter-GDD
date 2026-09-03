@@ -17,6 +17,7 @@ import { EnemyCrowd } from '../entities/EnemyCrowd';
 import { ObjectiveNode } from '../entities/ObjectiveNode';
 import { Boss } from '../entities/Boss';
 import { Finish } from '../entities/Finish';
+import { Pickup } from '../entities/Pickup';
 
 const BASE_FOV = 56;
 const CAM_BACK = 8.5;
@@ -32,7 +33,8 @@ interface Target {
   x: number;
   z: number;
   ref: Barricade | EnemyCrowd | ObjectiveNode | Boss | GatePair;
-  halfIdx?: number; // 'gate' only: which door the fire is landing on
+  halfIdx: number; // 'gate' only: which door the fire is landing on
+  weight: number; // share of the crowd's DPS this target receives (kept set sums to 1)
 }
 /** Centre -> camera-facing (-Z) face, per kind. Tracers aim here so the impact
  *  spark lands on the surface instead of buried inside a solid body. */
@@ -67,6 +69,9 @@ export class GameManager {
   private barricades: Barricade[] = [];
   private enemies: EnemyCrowd[] = [];
   private objectives: ObjectiveNode[] = [];
+  private pickups: Pickup[] = [];
+  /** Parallel to `pickups`: the crowd is past this one, collected or missed. */
+  private pickupPassed: boolean[] = [];
   private boss: Boss | null = null;
   private finish: Finish | null = null;
 
@@ -91,6 +96,7 @@ export class GameManager {
   private lanePreview: number[] = [];
   private lanePreviewCount = -1;
   private rewardDoubled = false;
+  private pickupsCollected = 0;
 
   private readonly app = document.getElementById('app')!;
 
@@ -224,9 +230,9 @@ export class GameManager {
 
   /**
    * Endless scaling: past the authored levels every wrap makes threats bigger and
-   * punishes harsher, while rewards (add/mul gates) stay authored so the balance
-   * curve tilts. Must copy: buildLevel re-reads `this.level` on every retry, so
-   * scaling in place would compound.
+   * punishes harsher, while rewards (add/mul gates, pickup `value`) stay authored
+   * so the balance curve tilts. Must copy: buildLevel re-reads `this.level` on
+   * every retry, so scaling in place would compound.
    */
   private scaleSegment(raw: Segment, wraps: number): Segment {
     const f = 1 + this.cfg.meta.wrapDifficultyStep * wraps;
@@ -278,6 +284,14 @@ export class GameManager {
         this.scene.add(this.finish.group);
         break;
       }
+      case 'coin_pickup':
+      case 'crowd_pickup': {
+        const p = new Pickup(seg, this.cfg);
+        this.scene.add(p.group);
+        this.pickups.push(p);
+        this.pickupPassed.push(false);
+        break;
+      }
     }
   }
 
@@ -286,10 +300,15 @@ export class GameManager {
     this.barricades.forEach((b) => b.dispose(this.scene));
     this.enemies.forEach((e) => e.dispose(this.scene));
     this.objectives.forEach((o) => o.dispose(this.scene));
+    this.pickups.forEach((p) => p.dispose(this.scene));
     this.boss?.dispose(this.scene);
     this.finish?.dispose(this.scene);
     this.gates = []; this.barricades = []; this.enemies = [];
     this.objectives = []; this.boss = null; this.finish = null;
+    this.pickups = []; this.pickupPassed = [];
+    // pooled slots hold refs to the entities just disposed — drop them here,
+    // not per frame, so the combat scan stays allocation-free
+    this.candidates.length = 0; this.candidateCount = 0;
   }
 
   // ---------------------------------------------------------------- run control
@@ -330,6 +349,7 @@ export class GameManager {
     this.heartbeatT = 0;
     this.chipCueT = 0;
     this.lanePreviewCount = -1;
+    this.pickupsCollected = 0;
     this.state = 'PLAYING';
     this.hud.setHint(true);
     this.hud.setCount(this.crowd.count, true); // a fresh run must not roll up from the last one
@@ -434,6 +454,10 @@ export class GameManager {
   }
 
   // ---------------------------------------------------------------- combat
+  /** Target slots reused by findTargets; only `[0, candidateCount)` is live. */
+  private candidates: Target[] = [];
+  private candidateCount = 0;
+
   private combat(dt: number): void {
     const c = this.cfg.combat;
     const cx = this.crowd.centroid.x;
@@ -463,18 +487,22 @@ export class GameManager {
       }
     }
 
-    // pick the single nearest target ahead to focus the crowd's fire
-    const t = this.findTarget(cx, cz, laneHalf, c.engageRange);
-    if (!t || dps <= 0) return;
+    // spread the crowd's fire over the nearest few targets ahead
+    const n = this.findTargets(cx, cz, laneHalf, c.engageRange);
+    if (n === 0 || dps <= 0) return;
 
-    if (t.kind === 'gate') {
-      // shooting a tickable gate pumps the door you are aimed at, nothing else
-      (t.ref as GatePair).hit(t.halfIdx ?? 0, dps * dt);
-    } else {
+    for (let i = 0; i < n; i++) {
+      const t = this.candidates[i];
+      const dmg = dps * dt * t.weight;
+      if (t.kind === 'gate') {
+        // shooting a tickable gate pumps the door you are aimed at, nothing else
+        (t.ref as GatePair).hit(t.halfIdx, dmg);
+        continue;
+      }
       const ref = t.ref as Barricade | EnemyCrowd | ObjectiveNode | Boss;
       const before = (ref as any).count ?? (ref as any).hp;
       const aliveBefore = ref.alive;
-      ref.takeDamage(dps * dt);
+      ref.takeDamage(dmg);
 
       // rewards / clears
       if (t.kind === 'barricade') {
@@ -499,30 +527,62 @@ export class GameManager {
       }
     }
 
-    // Visual tracers toward the target. Density is the main read on crowd size:
-    // it scales with sqrt(count) (like DPS) so 5 units trickle and 500 pour.
+    // Visual tracers toward the targets. Density is the main read on crowd size:
+    // it scales with sqrt(count) (like DPS) so 5 units trickle and 500 pour, and
+    // each tracer picks a target by damage share so the split is visible.
     const interval =
       clamp(0.09 / Math.sqrt(Math.max(1, this.crowd.count) / 5), 0.008, 0.09) / this.crowd.fireRateMul;
     this.bulletAccum += dt;
     while (this.bulletAccum > interval) {
       this.bulletAccum -= interval;
+      const t = this.pickWeighted(n);
       const fromX = cx + (Math.random() * 2 - 1) * Math.max(0.4, laneHalf);
       const fromZ = cz + 0.4;
       this.bullets.spawn(fromX, 0.5, fromZ, t.x, t.z - FACE_OFFSET[t.kind], c.bulletSpeed);
     }
   }
 
-  private findTarget(cx: number, cz: number, laneHalf: number, range: number): Target | null {
-    let best: Target | null = null;
+  /** One of the kept targets, drawn in proportion to its damage share. */
+  private pickWeighted(n: number): Target {
+    let r = Math.random();
+    for (let i = 0; i < n; i++) {
+      r -= this.candidates[i].weight;
+      if (r <= 0) return this.candidates[i];
+    }
+    return this.candidates[n - 1]; // float drift left a sliver unclaimed
+  }
+
+  /** Fills the pooled slot at `candidateCount`, growing the pool only once per slot. */
+  private pushCandidate(
+    kind: TargetKind, ref: Target['ref'], x: number, z: number, dist: number, halfIdx: number,
+  ): void {
+    const t = this.candidates[this.candidateCount];
+    if (t) {
+      t.kind = kind; t.ref = ref; t.x = x; t.z = z; t.dist = dist; t.halfIdx = halfIdx; t.weight = 0;
+    } else {
+      this.candidates.push({ kind, ref, x, z, dist, halfIdx, weight: 0 });
+    }
+    this.candidateCount++;
+  }
+
+  /**
+   * Every in-lane target ahead, nearest first, trimmed to `maxSplitTargets` and
+   * weighted by 1/(1 + dist*splitFalloff) normalized over the kept set. Results
+   * live in the pooled `candidates` array (reused frame to frame — the combat
+   * scan must not allocate); returns how many slots are live. A single target in
+   * range gets weight 1, so focused fire is unchanged.
+   */
+  private findTargets(cx: number, cz: number, laneHalf: number, range: number): number {
+    this.candidateCount = 0;
     const consider = (
       kind: TargetKind, ref: Target['ref'], x: number, z: number, half: number,
-      alive: boolean, halfIdx?: number,
+      alive: boolean, halfIdx = 0,
     ) => {
       if (!alive) return;
       const d = z - cz;
       if (d < -1 || d > range) return;
       if (Math.abs(cx - x) > laneHalf + half) return;
-      if (!best || d < best.dist) best = { kind, ref, dist: d, x, z, halfIdx };
+      this.pushCandidate(kind, ref, x, z, d, halfIdx);
     };
     // a dodged barricade survives now, so `passed` also has to stop the crowd
     // from turning around and shooting it
@@ -540,7 +600,26 @@ export class GameManager {
       consider('gate', g, half.x, g.z, half.halfWidth, true, h);
     }
     if (this.boss) consider('boss', this.boss, 0, this.boss.z, 1.4, this.boss.alive);
-    return best;
+
+    // Insertion sort by distance: only the handful of entities inside the engage
+    // range reach here, and it sorts the pooled prefix in place (no slice/sort).
+    const list = this.candidates;
+    for (let i = 1; i < this.candidateCount; i++) {
+      const t = list[i];
+      let j = i - 1;
+      while (j >= 0 && list[j].dist > t.dist) { list[j + 1] = list[j]; j--; }
+      list[j + 1] = t;
+    }
+
+    const keep = Math.min(this.candidateCount, Math.max(1, this.cfg.combat.maxSplitTargets));
+    let sum = 0;
+    for (let i = 0; i < keep; i++) {
+      const w = 1 / (1 + Math.max(0, list[i].dist) * this.cfg.combat.splitFalloff);
+      list[i].weight = w;
+      sum += w;
+    }
+    for (let i = 0; i < keep; i++) list[i].weight /= sum;
+    return keep;
   }
 
   // ---------------------------------------------------------------- gates
@@ -606,6 +685,29 @@ export class GameManager {
       }
     }
 
+    // Pickups: resolved once the crowd reaches their z, either way. A miss is
+    // latched without collect() so it scrolls past intact instead of popping.
+    for (let i = 0; i < this.pickups.length; i++) {
+      if (this.pickupPassed[i]) continue;
+      const p = this.pickups[i];
+      if (cz < p.z) continue;
+      this.pickupPassed[i] = true;
+      if (Math.abs(cx - p.x) > crowdHalf + p.halfWidth) continue;
+      p.collect();
+      this.pickupsCollected += 1;
+      if (p.kind === 'coin') {
+        this.save.addCoins(p.value);
+        this.hud.setCoins(this.save.get().coins);
+        this.popupWorld(`+${p.value}`, '#ffd24a', p.x, 1.4, p.z);
+        this.audio.play('coin');
+        this.particles.burst(p.x, 0.6, p.z, 8, 0xffd24a, 3);
+      } else {
+        this.crowd.add(p.value);
+        this.popupWorld(`+${p.value}`, '#5ce06a', p.x, 1.4, p.z);
+        this.audio.play('add'); // the birth ripple fires itself off the count rise
+      }
+    }
+
     if (this.finish) {
       if (!this.finish.picked && cz >= this.finish.laneZ) {
         const mult = this.finish.pickFor(cx);
@@ -645,6 +747,7 @@ export class GameManager {
     for (const b of this.barricades) b.update(dt, cam);
     for (const e of this.enemies) e.update(dt, this.time, cam);
     for (const o of this.objectives) o.update(dt, cam);
+    for (const p of this.pickups) p.update(dt, this.time, cam);
     if (this.finish) this.finish.update(dt, cam);
     if (this.boss) {
       const frac = this.boss.update(dt, this.time, cam, this.crowd.centroid.x, this.crowdHalf(), this.state === 'BOSS');
@@ -825,6 +928,8 @@ export class GameManager {
       z: this.crowd ? +this.crowd.centroid.z.toFixed(1) : 0,
       x: this.crowd ? +this.crowd.centroid.x.toFixed(2) : 0,
       bossHp: this.boss ? Math.ceil(this.boss.hp) : null,
+      bossAttack: this.boss ? this.boss.currentAttack : null,
+      pickups: this.pickupsCollected,
       runSpeed: +this.runSpeed.toFixed(2),
       coins: this.save.get().coins,
       peak: this.peakCount,

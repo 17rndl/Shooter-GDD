@@ -26,6 +26,10 @@ export interface GameConfig {
     enemyUnitHp: number;
     enemyPerUnitDamageFactor: number;
     enemyDamageFactor: number;
+    // fire splitting: how many targets the crowd can service at once, and how
+    // hard the per-target share falls off with distance (0 = even split)
+    maxSplitTargets: number;
+    splitFalloff: number;
   };
   boss: {
     standoff: number;
@@ -38,9 +42,13 @@ export interface GameConfig {
     firstTelegraphDelay: number;
     chipFractionPerSecond: number;
     chipMinUnitsPerSecond: number;
+    // slam: a shorter telegraph that locks onto the crowd and hits harder
+    slamTelegraphScale: number;
+    slamHitScale: number;
   };
   gates: { damagePerTick: number; mulCap: number; addCap: number; decayFloor: number };
   barricade: { ramFactor: number };
+  pickup: { halfWidth: number };
   meta: {
     reviveFraction: number;
     wrapDifficultyStep: number;

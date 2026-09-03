@@ -112,6 +112,21 @@ beat of the arc a physical signal, all pooled and allocation-free:
 - **Payoff has ceremony** — coins count up with blips before the ×2 ad button is revealed; finish
   lanes preview the coins they're worth as you approach; the boss's chip damage has an audible cue.
 
+### Content pass — variety without new code
+
+- **Pickups** — `coin_pickup` (a spinning row of coins, banks coins immediately) and `crowd_pickup`
+  (a small blue cluster, adds units) are steered into, never shot; they fill the gaps between beats
+  with something to aim for. Missed ones just scroll away.
+- **Lane-distributed fire** (GDD §6.2) — the crowd now splits its DPS across up to 3 in-lane
+  targets, nearest-weighted, so a wide crowd really does "cover more targets in parallel" and
+  flanking set pieces feel different from a single blob.
+- **Boss attacks from JSON** — the `attacks` array is honored and cycled: `sweep_fire` (a random
+  band you read from the telegraph) and `slam` (a band that locks onto *where you are standing*,
+  faster and harder — so standing still is the wrong answer). Orange telegraph = slam, red = sweep.
+- **Compound set pieces** — barricades guarding the good door, flanking enemy pairs, pickups after
+  a costly fight: all authored in the level JSON, no engine changes. The balance sim models
+  pickups, split fire and both attacks, and still has to pass.
+
 ## Not yet built (GDD phases 8–10, post-MVP)
 Extra juice polish + unit **skins** (cosmetic), real **ad SDK** wiring (AppLovin MAX behind the
 existing `IAdService`), **IAP**, **haptics**, and the **Unity/URP port** for Android `.aab` (the

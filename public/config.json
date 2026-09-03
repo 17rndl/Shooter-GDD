@@ -19,7 +19,9 @@
     "playerUnitHp": 3,
     "enemyUnitHp": 3,
     "enemyPerUnitDamageFactor": 0.85,
-    "enemyDamageFactor": 0.5
+    "enemyDamageFactor": 0.5,
+    "maxSplitTargets": 3,
+    "splitFalloff": 1.0
   },
   "boss": {
     "standoff": 6.5,
@@ -31,10 +33,13 @@
     "bandHalf": 1.5,
     "firstTelegraphDelay": 1.5,
     "chipFractionPerSecond": 0.01,
-    "chipMinUnitsPerSecond": 1
+    "chipMinUnitsPerSecond": 1,
+    "slamTelegraphScale": 0.8,
+    "slamHitScale": 1.25
   },
   "gates": { "damagePerTick": 12, "mulCap": 4, "addCap": 99, "decayFloor": 1 },
   "barricade": { "ramFactor": 0.8 },
+  "pickup": { "halfWidth": 0.6 },
   "meta": {
     "reviveFraction": 0.35,
     "wrapDifficultyStep": 0.35,

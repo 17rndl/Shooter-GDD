@@ -8,6 +8,9 @@
       "right": { "op": "add", "value": 12 },
       "tickable": false },
 
+    { "z": 30, "type": "coin_pickup", "x": -2.2, "value": 10 },
+    { "z": 37, "type": "coin_pickup", "x": -2.2, "value": 10 },
+    { "z": 44, "type": "coin_pickup", "x": -2.2, "value": 10 },
     { "z": 50, "type": "barricade", "x": 0.0, "hp": 155, "width": 2.2 },
 
     { "z": 78, "type": "gate_pair",
@@ -16,17 +19,20 @@
       "tickable": false },
 
     { "z": 104, "type": "enemy_crowd", "x": 1.4, "count": 24, "fireRate": 4.0 },
+    { "z": 112, "type": "crowd_pickup", "x": -1.6, "value": 12 },
 
     { "z": 132, "type": "objective_node", "x": -1.2, "hp": 190, "reward": 18 },
 
+    { "z": 156, "type": "barricade", "x": 1.5, "hp": 150, "width": 1.8 },
     { "z": 160, "type": "gate_pair",
       "left":  { "op": "mul", "value": 2 },
       "right": { "op": "add", "value": 20 },
       "tickable": true, "tickPerHit": 1 },
 
     { "z": 190, "type": "enemy_crowd", "x": -1.3, "count": 60, "fireRate": 5.0 },
+    { "z": 200, "type": "crowd_pickup", "x": 0.0, "value": 20 },
 
-    { "z": 222, "type": "boss", "hp": 4600, "attacks": ["sweep_fire"] },
+    { "z": 222, "type": "boss", "hp": 6200, "attacks": ["sweep_fire"] },
 
     { "z": 250, "type": "finish", "multiplierLanes": [2, 3, 5] }
   ]

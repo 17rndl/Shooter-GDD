@@ -5,8 +5,12 @@ import type { GameConfig, Segment } from '../data/types';
 
 type Phase = 'cooldown' | 'telegraph';
 
-// Level finale. A big HP sponge that periodically sweeps a lateral fire band the
+// Level finale. A big HP sponge that periodically throws a lateral fire band the
 // player must steer out of — turning the standoff into an active dodge.
+
+const ATTACK_KINDS: readonly string[] = ['sweep_fire', 'slam'];
+const SWEEP_TINT = 0xff3b30; // random band, full telegraph — read it and walk away
+const SLAM_TINT = 0xff8a3d;  // tracks the crowd, winds up faster, hits harder
 
 export class Boss {
   readonly group = new THREE.Group();
@@ -28,10 +32,18 @@ export class Boss {
   private readonly cfg: GameConfig;
   private dead = -1;
   private punch = 0;
+  private readonly attacks: string[];
+  private attackIndex = 0;
+  private attack: string;
 
   constructor(seg: Segment, cfg: GameConfig) {
     this.cfg = cfg;
     this.timer = cfg.boss.firstTelegraphDelay;
+    // Unknown names are dropped rather than fatal so a level can name an attack a
+    // future build adds; an all-unknown list still has to fight, hence the fallback.
+    const wanted = (seg.attacks ?? ['sweep_fire']).filter((a) => ATTACK_KINDS.includes(a));
+    this.attacks = wanted.length > 0 ? wanted : ['sweep_fire'];
+    this.attack = this.attacks[0];
     this.z = seg.z;
     this.hp = seg.hp ?? 1000;
     this.maxHp = this.hp;
@@ -58,7 +70,7 @@ export class Boss {
     // sweep telegraph strip (points back toward the player)
     const len = 28;
     this.telegraphMat = new THREE.MeshBasicMaterial({
-      color: 0xff3b30, transparent: true, opacity: 0, depthWrite: false, side: THREE.DoubleSide,
+      color: SWEEP_TINT, transparent: true, opacity: 0, depthWrite: false, side: THREE.DoubleSide,
     });
     this.telegraph = new THREE.Mesh(new THREE.PlaneGeometry(cfg.boss.bandHalf * 2, len), this.telegraphMat);
     this.telegraph.rotation.x = -Math.PI / 2;
@@ -69,6 +81,11 @@ export class Boss {
 
   hpFraction(): number {
     return clamp(this.hp / this.maxHp, 0, 1);
+  }
+
+  /** The attack currently winding up (or the one queued first, before the fight). */
+  get currentAttack(): string {
+    return this.attack;
   }
 
   /**
@@ -104,11 +121,12 @@ export class Boss {
   }
 
   /**
-   * Drives the attack cycle. Returns the crowd fraction to remove this frame
-   * (>0 only on the exact frame a sweep resolves and the band physically overlaps
-   * the formation). `crowdHalf` is the crowd's PHYSICAL half-width — not the much
-   * wider firing lane — and the loss scales with the share of that width the band
-   * actually covers, so a clean dodge costs nothing and a graze costs little.
+   * Drives the attack cycle, one entry of `attacks` per telegraph, in order.
+   * Returns the crowd fraction to remove this frame (>0 only on the exact frame an
+   * attack resolves and the band physically overlaps the formation). `crowdHalf` is
+   * the crowd's PHYSICAL half-width — not the much wider firing lane — and the loss
+   * scales with the share of that width the band actually covers, so a clean dodge
+   * costs nothing and a graze costs little.
    * `fighting` is false until the standoff begins; the cycle is frozen until then.
    */
   update(dt: number, time: number, cam: THREE.Camera, centroidX: number, crowdHalf: number, fighting: boolean): number {
@@ -150,8 +168,22 @@ export class Boss {
       this.mat.emissive.setHex(0x3a0a06);
       if (this.timer <= 0) {
         this.phase = 'telegraph';
-        this.timer = lerp(b.telegraphTime, b.telegraphTimeMin, hurt);
-        this.rollBand();
+        this.attack = this.attacks[this.attackIndex];
+        this.attackIndex = (this.attackIndex + 1) % this.attacks.length;
+        const tele = lerp(b.telegraphTime, b.telegraphTimeMin, hurt);
+        if (this.attack === 'slam') {
+          this.hasRolled = true; // a slam band is a real previous band for the next sweep's anti-repeat
+          // Locks onto where the crowd stands the instant the wind-up starts, so
+          // the only answer is to move — and it allows less time to do it.
+          const bh = b.bandHalf;
+          this.bandCenter = clamp(centroidX, this.cfg.track.minX + bh, this.cfg.track.maxX - bh);
+          this.timer = tele * b.slamTelegraphScale;
+          this.telegraphMat.color.setHex(SLAM_TINT);
+        } else {
+          this.rollBand();
+          this.timer = tele;
+          this.telegraphMat.color.setHex(SWEEP_TINT);
+        }
         this.telegraph.position.x = this.bandCenter;
         this.telegraph.visible = true;
       }
@@ -166,7 +198,8 @@ export class Boss {
         const hi = Math.min(centroidX + crowdHalf, this.bandCenter + b.bandHalf);
         const overlap = Math.max(0, hi - lo);
         const overlapFrac = crowdHalf > 0 ? overlap / (2 * crowdHalf) : 0;
-        damageFraction = b.hitFraction * overlapFrac;
+        const bite = this.attack === 'slam' ? b.slamHitScale : 1;
+        damageFraction = b.hitFraction * bite * overlapFrac;
         this.telegraph.visible = false;
         this.telegraphMat.opacity = 0;
         this.phase = 'cooldown';

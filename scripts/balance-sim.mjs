@@ -7,7 +7,7 @@
 // dies before the finish.
 //
 // The formulas below MUST mirror src/ (CrowdController, EnemyCrowd, GatePair,
-// Boss, GameManager). If a mechanic changes there, change it here too.
+// Boss, Pickup, GameManager). If a mechanic changes there, change it here too.
 // ---------------------------------------------------------------------------
 import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -35,6 +35,7 @@ const rawCombat = obj(cfg.combat);
 const rawBoss = obj(cfg.boss);
 const rawGates = obj(cfg.gates);
 const rawBarricade = obj(cfg.barricade);
+const rawPickup = obj(cfg.pickup);
 
 const COMBAT = {
   perUnitDamage: rawCombat.perUnitDamage,
@@ -47,6 +48,9 @@ const COMBAT = {
   enemyUnitHp: num(rawCombat.enemyUnitHp, 3),
   enemyPerUnitDamageFactor: num(rawCombat.enemyPerUnitDamageFactor, 0.85),
   enemyDamageFactor: num(rawCombat.enemyDamageFactor, 0.5),
+  // split-fire keys; fallbacks are the shipped contract values
+  maxSplitTargets: num(rawCombat.maxSplitTargets, 3),
+  splitFalloff: num(rawCombat.splitFalloff, 1.0),
 };
 const BOSS = {
   standoff: num(rawBoss.standoff, 6.5),
@@ -59,6 +63,9 @@ const BOSS = {
   firstTelegraphDelay: num(rawBoss.firstTelegraphDelay, 1.5),
   chipFractionPerSecond: num(rawBoss.chipFractionPerSecond, 0.01),
   chipMinUnitsPerSecond: num(rawBoss.chipMinUnitsPerSecond, 1),
+  // slam keys; fallbacks are the shipped contract values
+  slamTelegraphScale: num(rawBoss.slamTelegraphScale, 0.8),
+  slamHitScale: num(rawBoss.slamHitScale, 1.25),
 };
 const GATES = {
   damagePerTick: num(rawGates.damagePerTick, 12),
@@ -67,7 +74,12 @@ const GATES = {
   decayFloor: num(rawGates.decayFloor, 1),
 };
 const RAM_FACTOR = num(rawBarricade.ramFactor, 0.8);
+const PICKUP = { halfWidth: num(rawPickup.halfWidth, 0.6) };
 const ENGAGE = COMBAT.engageRange;
+
+// Attack names Boss understands. Anything else in a level's `attacks` array is
+// skipped, exactly as the entity does, and an empty result falls back to sweep.
+const BOSS_ATTACKS = new Set(['sweep_fire', 'slam']);
 
 // Boss.rollBand picks a uniformly random band centre in [minX+bandHalf, maxX-bandHalf]
 // and re-rolls when it lands within 1.0 of the previous one. The harness must stay
@@ -116,7 +128,9 @@ const tickedValue = (half, ticks, tickPerHit) => {
 
 // ---------------------------------------------------------------- world build
 function buildWorld(level) {
-  const w = { gates: [], barricades: [], enemies: [], objectives: [], boss: null, finish: null };
+  const w = {
+    gates: [], barricades: [], enemies: [], objectives: [], pickups: [], boss: null, finish: null,
+  };
   const { minX, maxX } = TRACK;
   const mid = (minX + maxX) / 2;
   const gateHalfW = (maxX - minX) / 4;
@@ -154,9 +168,22 @@ function buildWorld(level) {
           halfWidth: 0.8, alive: true, plan: null,
         });
         break;
-      case 'boss':
-        w.boss = { z: seg.z, hp: seg.hp ?? 1000, maxHp: seg.hp ?? 1000, alive: true };
+      case 'coin_pickup':
+      case 'crowd_pickup':
+        w.pickups.push({
+          kind: seg.type === 'crowd_pickup' ? 'crowd' : 'coin',
+          x: seg.x ?? 0, z: seg.z, value: seg.value ?? 10, taken: false,
+        });
         break;
+      case 'boss': {
+        const attacks = (Array.isArray(seg.attacks) ? seg.attacks : ['sweep_fire'])
+          .filter((a) => BOSS_ATTACKS.has(a));
+        w.boss = {
+          z: seg.z, hp: seg.hp ?? 1000, maxHp: seg.hp ?? 1000, alive: true,
+          attacks: attacks.length > 0 ? attacks : ['sweep_fire'],
+        };
+        break;
+      }
       case 'finish':
         w.finish = { z: seg.z };
         break;
@@ -224,11 +251,16 @@ function runPolicy(level, policy) {
   let bossTimer = BOSS.firstTelegraphDelay;
   let bossStart = -1;
   let bandIdx = 0;
+  let attackIdx = 0;
+  let attackKind = 'sweep_fire';
   let bandCenter = 0;
+  let prevBand = null; // band of the previous telegraph; null before the first
+  const cand = []; // hoisted: the in-lane targets this frame, mirrors findTargets
   const out = {
     policy, finished: false, stalled: false, death: null,
     crowdAtBoss: 0, bossTTK: 0, survivors: 0, bossKilled: false, finalCount: 0,
-    sweeps: 0, sweepLoss: 0, trace: [],
+    sweeps: 0, sweepLoss: 0, picked: 0, trace: [],
+    attacks: w.boss ? w.boss.attacks.join('+') : '—',
   };
 
   const note = (s) => out.trace.push(s);
@@ -305,16 +337,17 @@ function runPolicy(level, policy) {
       bleed(enemyUnitsPerSecond(e.count, e.fireRate) * DT, `enemy@${e.z}`);
     }
 
-    // ---- the crowd's fire: single nearest in-lane target -------------------
+    // ---- the crowd's fire: split across the nearest few in-lane targets ----
     if (dps > 0) {
-      let tgt = null;
+      cand.length = 0;
       const consider = (kind, ref, x, z, half, halfIdx) => {
         const d = z - cz;
         if (d < -1 || d > ENGAGE) return;
         if (Math.abs(cx - x) > laneH + half) return;
-        if (!tgt || d < tgt.d) tgt = { kind, ref, d, halfIdx };
+        cand.push({ kind, ref, d, halfIdx, w: 0 });
       };
-      // Order mirrors GameManager.findTarget so ties break identically.
+      // Order mirrors GameManager.findTargets, and the sort below is stable, so
+      // equal-distance ties keep the same priority they have in game.
       if (best) for (const b of w.barricades) if (b.alive) consider('barricade', b, b.x, b.z, b.halfWidth);
       for (const e of w.enemies) if (e.alive) consider('enemy', e, e.x, e.z, enemyHalf(e.count));
       if (best) for (const o of w.objectives) if (o.alive) consider('objective', o, o.x, o.z, o.halfWidth);
@@ -328,8 +361,18 @@ function runPolicy(level, policy) {
       }
       if (w.boss && w.boss.alive) consider('boss', w.boss, 0, w.boss.z, 1.4);
 
-      if (tgt) {
-        const dmg = dps * DT;
+      // Nearest maxSplitTargets share the DPS, weighted 1/(1+d*falloff) and
+      // normalised — with a single target in range this is exactly full DPS.
+      cand.sort((a, b) => a.d - b.d);
+      const kept = Math.min(cand.length, Math.max(1, COMBAT.maxSplitTargets));
+      let wsum = 0;
+      for (let i = 0; i < kept; i++) {
+        cand[i].w = 1 / (1 + Math.max(0, cand[i].d) * COMBAT.splitFalloff);
+        wsum += cand[i].w;
+      }
+      for (let i = 0; i < kept; i++) {
+        const tgt = cand[i];
+        const dmg = dps * DT * (tgt.w / wsum);
         if (tgt.kind === 'gate') {
           hitGate(tgt.ref, tgt.halfIdx, dmg);
         } else if (tgt.kind === 'enemy') {
@@ -372,8 +415,19 @@ function runPolicy(level, policy) {
       if (bossTimer <= 0) {
         if (bossPhase === 'cooldown') {
           bossPhase = 'telegraph';
+          // one attack per telegraph, cycled in authored order
+          attackKind = w.boss.attacks[attackIdx++ % w.boss.attacks.length];
           bossTimer = lerp(BOSS.telegraphTime, BOSS.telegraphTimeMin, 1 - frac);
-          bandCenter = BAND_SEQUENCE[bandIdx++ % BAND_SEQUENCE.length];
+          if (attackKind === 'slam') {
+            // The band locks onto the crowd where it stands when the wind-up
+            // starts: BEST is parked at the wall farthest from the last band
+            // (it has been sitting there since that resolve), WORST at 0.
+            const startX = best ? (prevBand === null ? 0 : prevBand < 0 ? TRACK.maxX : TRACK.minX) : 0;
+            bandCenter = clamp(startX, TRACK.minX + BOSS.bandHalf, TRACK.maxX - BOSS.bandHalf);
+            bossTimer *= BOSS.slamTelegraphScale; // shorter fuse than a sweep
+          } else {
+            bandCenter = BAND_SEQUENCE[bandIdx++ % BAND_SEQUENCE.length];
+          }
         } else {
           // Mirrors Boss.update: the loss is the share of the formation's physical
           // width the band covers. BEST runs for the wall farthest from the band
@@ -384,12 +438,30 @@ function runPolicy(level, policy) {
           const hi = Math.min(sweepX + ch, bandCenter + BOSS.bandHalf);
           const overlap = Math.max(0, hi - lo);
           const overlapFrac = ch > 0 ? overlap / (2 * ch) : 0;
+          const hitScale = attackKind === 'slam' ? BOSS.slamHitScale : 1;
           out.sweeps += 1;
-          out.sweepLoss += kill(Math.ceil(c * BOSS.hitFraction * overlapFrac), 'boss sweep');
+          const lost = kill(Math.ceil(c * BOSS.hitFraction * hitScale * overlapFrac), `boss ${attackKind}`);
+          out.sweepLoss += lost;
+          if (lost > 0) note(`boss ${attackKind}@${bandCenter.toFixed(2)} -${lost} → ${c}`);
+          prevBand = bandCenter;
           bossPhase = 'cooldown';
           bossTimer = lerp(BOSS.cooldown, BOSS.cooldownMin, 1 - frac);
         }
       }
+    }
+
+    // ---- pickups -----------------------------------------------------------
+    // Coins only ever pay out currency, so they cannot move the crowd rule.
+    // A crowd_pickup sits somewhere on a 6-wide track that BEST can always reach
+    // without giving up a beat, so BEST banks every one and WORST takes none.
+    for (const p of w.pickups) {
+      if (p.taken || cz < p.z) continue;
+      p.taken = true;
+      if (!best || p.kind !== 'crowd') continue;
+      if (p.x < TRACK.minX - PICKUP.halfWidth || p.x > TRACK.maxX + PICKUP.halfWidth) continue;
+      out.picked += p.value;
+      c += p.value;
+      note(`pickup@${p.z} +${p.value} → ${c}`);
     }
 
     // ---- gates -------------------------------------------------------------
@@ -475,6 +547,8 @@ for (const file of levelFiles) {
     survivors: best.bossKilled ? `${(share * 100).toFixed(0)}%` : '—',
     sweeps: best.sweeps,
     sweepLoss: best.sweepLoss,
+    picked: best.picked,
+    attacks: best.attacks,
     worst: worst.death ? `z=${worst.death.z.toFixed(0)} ${worst.death.cause}` : 'survives',
     verdict: problems.length === 0 ? 'PASS' : 'FAIL',
   });
@@ -487,14 +561,17 @@ const cols = [
   ['best@boss', 'atBoss', 9],
   ['boss TTK', 'ttk', 8],
   ['survivors', 'survivors', 9],
-  ['sweeps', 'sweeps', 6],
-  ['swept', 'sweepLoss', 5],
+  ['attacks', 'attacks', 16],
+  ['hits', 'sweeps', 5],
+  ['lost', 'sweepLoss', 5],
+  ['picked', 'picked', 6],
   ['worst dies', 'worst', 26],
   ['', 'verdict', 4],
 ];
 const line = (cells) => cells.map(([v, wdt]) => String(v).padEnd(wdt)).join('  ');
 console.log('\n§15 balance — BEST (every good gate) vs WORST (every bad gate)');
-console.log('sweeps/swept = boss sweeps the BEST path faced and the units they cost it\n');
+console.log('attacks = the kinds the level\'s boss cycles; hits/lost = boss attacks the BEST');
+console.log('path faced and the units they cost it; picked = units banked from crowd pickups\n');
 console.log(line(cols.map((c) => [c[0], c[2]])));
 console.log(line(cols.map((c) => ['-'.repeat(c[2]), c[2]])));
 for (const r of rows) console.log(line(cols.map((c) => [r[c[1]], c[2]])));
