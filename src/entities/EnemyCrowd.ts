@@ -24,6 +24,7 @@ export class EnemyCrowd {
   private jitter: Float32Array;
   private phase: Float32Array;
   private scratch: Vec2 = { x: 0, z: 0 };
+  private punch = 0;
   private readonly cfg: GameConfig;
 
   constructor(seg: Segment, cfg: GameConfig, scene: THREE.Scene) {
@@ -69,6 +70,7 @@ export class EnemyCrowd {
 
   takeDamage(d: number): void {
     if (!this.alive) return;
+    if (this.punch < 0.35) this.punch = 1; // re-arm once decayed so sustained fire flinches, not bulges
     this.hp -= d;
     this.count = Math.max(0, Math.ceil(this.hp / this.cfg.combat.enemyUnitHp));
     if (this.hp <= 0) {
@@ -78,6 +80,7 @@ export class EnemyCrowd {
   }
 
   update(dt: number, time: number, cam: THREE.Camera): void {
+    if (this.punch > 0) this.punch = Math.max(0, this.punch - dt * 8);
     const n = this.visible;
     const groundY = this.instancer.groundY;
     for (let i = 0; i < n; i++) {
@@ -91,7 +94,14 @@ export class EnemyCrowd {
     this.instancer.commit();
     this.plate.set(String(this.count));
     this.plate.faceCamera(cam);
-    if (!this.alive) this.group.visible = false;
+    if (!this.alive) { this.group.visible = false; return; } // dead: no punch, group is hidden
+    // Instances carry absolute world coords, so a bare group scale would slide the
+    // formation away from the origin — pull the pivot back onto (x, 0, z). The plate
+    // rides in this group, so counter-scale it: the punch must never grow the label.
+    const s = 1 + 0.06 * this.punch;
+    this.group.scale.setScalar(s);
+    this.group.position.set(this.x * (1 - s), 0, this.z * (1 - s));
+    this.plate.mesh.scale.setScalar(1 / s);
   }
 
   dispose(scene: THREE.Scene): void {

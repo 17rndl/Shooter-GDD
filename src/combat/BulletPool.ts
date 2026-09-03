@@ -15,6 +15,8 @@ const FWD = new THREE.Vector3(0, 0, 1);
 
 export class BulletPool {
   readonly mesh: THREE.InstancedMesh;
+  /** Fired where a bullet dies of old age in update(). clear() never calls it. */
+  onExpire: ((x: number, y: number, z: number) => void) | null = null;
   private bullets: Bullet[] = [];
   private cursor = 0;
   private m = new THREE.Matrix4();
@@ -54,7 +56,9 @@ export class BulletPool {
     b.vx = ux * speed;
     b.vy = 0;
     b.vz = uz * speed;
-    b.life = Math.min(0.6, len / speed + 0.05);
+    // No overshoot: onExpire spawns the impact spark, so the bullet must die AT
+    // the aim point. Extra life would bury the burst inside/behind the target.
+    b.life = Math.min(0.6, len / speed);
     b.active = true;
   }
 
@@ -77,6 +81,8 @@ export class BulletPool {
       if (b.life <= 0) {
         b.active = false;
         this.park(i);
+        // parked first: the callback may spawn, and must not find slot i live
+        this.onExpire?.(b.x, b.y, b.z);
         continue;
       }
       DIR.set(b.vx, b.vy, b.vz).normalize();

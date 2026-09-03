@@ -4,6 +4,7 @@ import { clamp } from '../util/MathUtil';
 import { Track } from '../world/Track';
 import { CrowdController } from '../crowd/CrowdController';
 import { BulletPool } from '../combat/BulletPool';
+import { ParticlePool } from '../combat/ParticlePool';
 import { InputSystem } from '../systems/InputSystem';
 import { HUD } from '../ui/HUD';
 import { ShopPanel } from '../ui/ShopPanel';
@@ -33,6 +34,11 @@ interface Target {
   ref: Barricade | EnemyCrowd | ObjectiveNode | Boss | GatePair;
   halfIdx?: number; // 'gate' only: which door the fire is landing on
 }
+/** Centre -> camera-facing (-Z) face, per kind. Tracers aim here so the impact
+ *  spark lands on the surface instead of buried inside a solid body. */
+const FACE_OFFSET: Record<TargetKind, number> = {
+  barricade: 0.35, enemy: 0, objective: 0.85, boss: 0.8, gate: 0,
+};
 
 export class GameManager {
   private renderer: THREE.WebGLRenderer;
@@ -55,6 +61,7 @@ export class GameManager {
   private crowd!: CrowdController;
   private bullets!: BulletPool;
   private enemyBullets!: BulletPool;
+  private particles!: ParticlePool;
 
   private gates: GatePair[] = [];
   private barricades: Barricade[] = [];
@@ -78,6 +85,12 @@ export class GameManager {
   private transitioning = false;
   private runGen = 0;
   private enemyTracerIdx = 0;
+  private tickRamp = 0;
+  private heartbeatT = 0;
+  private chipCueT = 0;
+  private lanePreview: number[] = [];
+  private lanePreviewCount = -1;
+  private rewardDoubled = false;
 
   private readonly app = document.getElementById('app')!;
 
@@ -122,6 +135,22 @@ export class GameManager {
     this.crowd = new CrowdController(this.cfg, this.scene);
     this.bullets = new BulletPool(this.cfg.combat.maxVisibleBullets, 0xfff1a8, this.scene);
     this.enemyBullets = new BulletPool(28, 0xff7a3d, this.scene);
+    this.particles = new ParticlePool(240, this.scene);
+    this.crowd.particles = this.particles;
+    // tracers die into a spark puff instead of blinking out
+    this.bullets.onExpire = (x, y, z) => {
+      this.particles.burst(x, y, z, 3, 0xfff1a8, 2.5);
+      this.audio.play('spark'); // self-throttled: this fires ~100×/s at high crowd counts
+    };
+    this.enemyBullets.onExpire = (x, y, z) => this.particles.burst(x, y, z, 2, 0xff7a3d, 2.0);
+
+    this.audio.enabled = this.save.get().settings.sound;
+    this.hud.onCountTick = (_v, rising) => {
+      // consecutive rising ticks climb in pitch, so a big gate reads as a run-up
+      this.tickRamp = rising ? Math.min(1, this.tickRamp + 0.06) : 0;
+      this.audio.play('tick', this.tickRamp);
+    };
+    this.hud.onCoinTick = () => this.audio.play('tick', 0.6);
 
     await this.loadLevel(this.save.get().currentLevel);
     this.hud.setCoins(this.save.get().coins);
@@ -296,9 +325,15 @@ export class GameManager {
     this.enemyBullets.clear();
     this.input.resetCenter();
     this.bossBarShown = false;
+    this.hud.bossBar(false);
+    this.tickRamp = 0;
+    this.heartbeatT = 0;
+    this.chipCueT = 0;
+    this.lanePreviewCount = -1;
     this.state = 'PLAYING';
     this.hud.setHint(true);
-    this.hud.setCount(this.crowd.count);
+    this.hud.setCount(this.crowd.count, true); // a fresh run must not roll up from the last one
+    this.hud.setDanger(false);
     this.hud.setProgress(0);
   }
 
@@ -312,12 +347,18 @@ export class GameManager {
     if (this.state === 'PLAYING' || this.state === 'BOSS') {
       this.simulate(dt);
     }
+    // Unconditional: death pops and the count roll-up must finish playing while
+    // an overlay is up, not freeze mid-air.
+    this.particles.update(dt);
+    this.hud.update(dtReal);
     this.updateEntitiesVisual(dt);
     this.updateCamera(dtReal);
     this.renderer.render(this.scene, this.camera);
   }
 
   private simulate(dt: number): void {
+    this.chipCueT = Math.max(0, this.chipCueT - dt);
+
     // INPUT → steer
     this.crowd.steerNormalized(this.input.value);
 
@@ -344,12 +385,19 @@ export class GameManager {
     this.gateSystem();
     // COLLISIONS (barricade ram, finish)
     this.collisionSystem();
+    this.finishPreview();
 
     // Boss chip: the standoff bleeds the crowd every frame, so out-waiting the
     // sweep is never a strategy — you have to out-damage it.
     if (this.state === 'BOSS' && this.boss && this.boss.alive) {
       const b = this.cfg.boss;
-      this.crowd.damage(Math.max(b.chipMinUnitsPerSecond, this.crowd.count * b.chipFractionPerSecond) * dt);
+      const chipped = this.crowd.damage(
+        Math.max(b.chipMinUnitsPerSecond, this.crowd.count * b.chipFractionPerSecond) * dt,
+      );
+      if (chipped >= 1 && this.chipCueT <= 0) {
+        this.audio.play('hit');
+        this.chipCueT = 0.5; // the bleed is constant; the cue must not be
+      }
     }
 
     // bullets
@@ -360,6 +408,21 @@ export class GameManager {
     this.hud.setCount(this.crowd.count);
     const prog = clamp(this.crowd.centroid.z / this.level.length, 0, 1);
     this.hud.setProgress(prog);
+    // `count < peakCount` keeps the opening beat clean: a run that starts at the
+    // threshold (config startingCount 5) is not "near death" until it has actually
+    // lost someone. peakCount is refreshed above, so it is always >= count here.
+    const danger = this.crowd.count <= 5 && this.crowd.count < this.peakCount
+      && (this.state === 'PLAYING' || this.state === 'BOSS');
+    this.hud.setDanger(danger);
+    if (danger) {
+      this.heartbeatT -= dt;
+      if (this.heartbeatT <= 0) {
+        this.audio.play('heartbeat');
+        this.heartbeatT = 0.9;
+      }
+    } else {
+      this.heartbeatT = 0; // re-entering danger thumps immediately
+    }
     if (this.bossBarShown && this.boss) this.hud.bossBar(this.boss.alive, this.boss.hpFraction());
 
     // boss death → resume to finish
@@ -410,10 +473,19 @@ export class GameManager {
     } else {
       const ref = t.ref as Barricade | EnemyCrowd | ObjectiveNode | Boss;
       const before = (ref as any).count ?? (ref as any).hp;
+      const aliveBefore = ref.alive;
       ref.takeDamage(dps * dt);
 
       // rewards / clears
-      if (t.kind === 'objective') {
+      if (t.kind === 'barricade') {
+        if (aliveBefore && !ref.alive) {
+          // shot down, not rammed — the green/white payoff for spending fire on it
+          this.audio.play('break');
+          this.hud.flash('#ffffff', 0.25);
+          this.shake = Math.max(this.shake, 0.2);
+          this.popupWorld('BREAK', '#5ce06a', (ref as Barricade).x, 1.4, (ref as Barricade).z);
+        }
+      } else if (t.kind === 'objective') {
         const o = ref as ObjectiveNode;
         if (o.cleared && o.reward > 0) {
           this.crowd.add(o.reward);
@@ -427,13 +499,16 @@ export class GameManager {
       }
     }
 
-    // visual tracers toward the target
+    // Visual tracers toward the target. Density is the main read on crowd size:
+    // it scales with sqrt(count) (like DPS) so 5 units trickle and 500 pour.
+    const interval =
+      clamp(0.09 / Math.sqrt(Math.max(1, this.crowd.count) / 5), 0.008, 0.09) / this.crowd.fireRateMul;
     this.bulletAccum += dt;
-    while (this.bulletAccum > 0.03) {
-      this.bulletAccum -= 0.03;
-      const fromX = cx + (Math.random() - 0.5) * Math.max(0.4, laneHalf);
+    while (this.bulletAccum > interval) {
+      this.bulletAccum -= interval;
+      const fromX = cx + (Math.random() * 2 - 1) * Math.max(0.4, laneHalf);
       const fromZ = cz + 0.4;
-      this.bullets.spawn(fromX, 0.5, fromZ, t.x, t.z, c.bulletSpeed);
+      this.bullets.spawn(fromX, 0.5, fromZ, t.x, t.z - FACE_OFFSET[t.kind], c.bulletSpeed);
     }
   }
 
@@ -449,7 +524,9 @@ export class GameManager {
       if (Math.abs(cx - x) > laneHalf + half) return;
       if (!best || d < best.dist) best = { kind, ref, dist: d, x, z, halfIdx };
     };
-    for (const b of this.barricades) consider('barricade', b, b.x, b.z, b.halfWidth, b.alive);
+    // a dodged barricade survives now, so `passed` also has to stop the crowd
+    // from turning around and shooting it
+    for (const b of this.barricades) consider('barricade', b, b.x, b.z, b.halfWidth, b.alive && !b.passed);
     for (const e of this.enemies) {
       const myHalf = Math.max(0.4, this.cfg.crowd.formationSpacing * Math.sqrt(e.count) * 0.5);
       consider('enemy', e, e.x, e.z, myHalf, e.alive);
@@ -523,9 +600,9 @@ export class GameManager {
             this.hud.flash('#ff5a52', 0.35);
             this.shake = Math.max(this.shake, 0.3);
           }
-        } else if (b.alive) {
-          b.forceBreak(); // crowd steered around it
         }
+        // a barricade the crowd steered around stays standing — dodging is a
+        // choice you can see behind you, not a free break
       }
     }
 
@@ -540,6 +617,25 @@ export class GameManager {
         this.onWin(this.finish.pickedMultiplier);
       }
     }
+  }
+
+  /**
+   * Live coin value under each finish lane while the crowd closes on the bank, so
+   * the lane choice is a number comparison instead of a guess.
+   */
+  private finishPreview(): void {
+    const f = this.finish;
+    if (!f || f.picked) return;
+    if (Math.abs(f.laneZ - this.crowd.centroid.z) > this.cfg.combat.engageRange) return;
+    if (this.crowd.count === this.lanePreviewCount) return;
+    this.lanePreviewCount = this.crowd.count;
+    const per = this.cfg.economy.coinPerUnit + this.save.get().upgrades.income;
+    // reused buffer: this runs for as long as the bank is on screen
+    if (this.lanePreview.length !== f.lanes.length) this.lanePreview.length = f.lanes.length;
+    for (let i = 0; i < f.lanes.length; i++) {
+      this.lanePreview[i] = Math.round(this.crowd.count * per * f.lanes[i]);
+    }
+    f.setLanePreview(this.lanePreview);
   }
 
   // ---------------------------------------------------------------- visuals
@@ -622,48 +718,57 @@ export class GameManager {
     let coins = Math.round(surviving * coinPerUnit * Math.max(1, mult));
     this.save.addCoins(coins);
     this.hud.setCoins(this.save.get().coins);
-    this.audio.play('coin');
+    this.audio.play('cheer');
+    this.hud.setDanger(false);
+    const isNewBest = this.recordPeak();
+    this.rewardDoubled = false;
 
     this.state = 'REWARD';
-    this.showReward(surviving, mult, coins);
+    this.showReward(surviving, mult, coins, isNewBest);
   }
 
-  private showReward(surviving: number, mult: number, coins: number): void {
-    this.hud.showOverlay({
-      title: 'LEVEL CLEAR!',
-      body: `${surviving} survivors · ×${mult} lane`,
-      extraHTML: `<div class="reward-coins">+${coins} ●</div>`,
-      btnText: 'NEXT LEVEL',
-      onBtn: () => { this.audio.play('click'); void this.advanceLevel(); },
-      btn3Text: '🛒 SHOP',
-      onBtn3: () => {
+  /** Persists the run's peak crowd if it beat the record; true when it did. */
+  private recordPeak(): boolean {
+    const s = this.save.get();
+    if (this.peakCount <= s.bestPeak) return false;
+    s.bestPeak = this.peakCount;
+    this.save.save();
+    return true;
+  }
+
+  private showReward(surviving: number, mult: number, coins: number, isNewBest: boolean): void {
+    this.hud.showRewardCeremony({
+      survivors: surviving,
+      mult,
+      coins,
+      best: this.save.get().bestPeak,
+      isNewBest,
+      onNext: () => { this.audio.play('click'); void this.advanceLevel(); },
+      onDouble: () => { void this.doubleCoins(coins); },
+      onShop: () => {
         this.audio.play('click');
         this.hud.hideOverlay();
         this.shop.open(() => {
           this.hud.setCoins(this.save.get().coins);
-          this.showReward(surviving, mult, coins);
+          this.showReward(surviving, mult, coins, isNewBest); // replays the ceremony from the top
         });
       },
-      btn2Text: '×2 COINS (AD)',
-      onBtn2: async () => {
-        this.audio.play('click');
-        const gen = this.runGen;
-        const ok = await this.ads.showRewarded('double_coins');
-        if (gen !== this.runGen || this.state !== 'REWARD') return; // run moved on during the ad
-        if (ok) {
-          this.save.addCoins(coins);
-          this.hud.setCoins(this.save.get().coins);
-          this.audio.play('coin');
-          this.hud.showOverlay({
-            title: 'LEVEL CLEAR!',
-            body: `${surviving} survivors · ×${mult} lane`,
-            extraHTML: `<div class="reward-coins">+${coins * 2} ● (doubled)</div>`,
-            btnText: 'NEXT LEVEL',
-            onBtn: () => { this.audio.play('click'); void this.advanceLevel(); },
-          });
-        }
-      },
     });
+    // a re-show (returning from the shop) must not re-arm an already-claimed ×2
+    if (this.rewardDoubled) this.hud.setRewardCoins(coins * 2, true);
+  }
+
+  private async doubleCoins(coins: number): Promise<void> {
+    this.audio.play('click');
+    const gen = this.runGen;
+    const ok = await this.ads.showRewarded('double_coins');
+    if (gen !== this.runGen || this.state !== 'REWARD') return; // run moved on during the ad
+    if (!ok) return;
+    this.rewardDoubled = true;
+    this.save.addCoins(coins);
+    this.hud.setCoins(this.save.get().coins);
+    this.audio.play('coin');
+    this.hud.setRewardCoins(coins * 2, true);
   }
 
   private onLose(): void {
@@ -672,6 +777,8 @@ export class GameManager {
     this.state = 'LOSE';
     this.audio.play('lose');
     this.hud.bossBar(false);
+    this.hud.setDanger(false); // simulate() stops here, so clear the vignette by hand
+    this.recordPeak();
     this.showLoseOverlay();
   }
 
@@ -704,7 +811,7 @@ export class GameManager {
   private revive(): void {
     const amount = Math.max(10, Math.floor(this.peakCount * this.cfg.meta.reviveFraction));
     this.crowd.count = amount;
-    this.hud.setCount(amount);
+    this.hud.setCount(amount, true); // a revive is a hard reset, not a roll-up
     this.hud.hideOverlay();
     if (this.resumeState === 'BOSS' && this.boss) this.hud.bossBar(true, this.boss.hpFraction());
     this.state = this.resumeState;
@@ -720,6 +827,8 @@ export class GameManager {
       bossHp: this.boss ? Math.ceil(this.boss.hp) : null,
       runSpeed: +this.runSpeed.toFixed(2),
       coins: this.save.get().coins,
+      peak: this.peakCount,
+      bestPeak: this.save.get().bestPeak,
     };
   }
 

@@ -27,6 +27,7 @@ export class Boss {
   private hasRolled = false;
   private readonly cfg: GameConfig;
   private dead = -1;
+  private punch = 0;
 
   constructor(seg: Segment, cfg: GameConfig) {
     this.cfg = cfg;
@@ -92,6 +93,7 @@ export class Boss {
 
   takeDamage(d: number): void {
     if (!this.alive) return;
+    if (this.punch < 0.35) this.punch = 1; // re-arm once decayed so sustained fire flinches, not bulges
     this.hp -= d;
     if (this.hp <= 0) {
       this.hp = 0;
@@ -113,16 +115,18 @@ export class Boss {
     this.plate.set(this.alive ? String(Math.ceil(this.hp)) : '0');
     this.plate.faceCamera(cam);
     this.mesh.position.y = 1.2 + Math.sin(time * 2) * 0.06;
+    if (this.punch > 0) this.punch = Math.max(0, this.punch - dt * 8);
 
     if (this.dead >= 0) {
       this.dead += dt;
       const k = Math.max(0, 1 - this.dead * 1.6);
-      this.mesh.scale.setScalar(k);
+      this.mesh.scale.setScalar(k); // the death collapse owns mesh.scale — punch stays out of it
       this.mat.emissiveIntensity = 1 + Math.sin(time * 30) * 0.5;
       if (k <= 0) this.group.visible = false;
       return 0;
     }
     if (!this.alive) return 0;
+    this.mesh.scale.setScalar(1 + 0.06 * this.punch);
 
     // Not engaged yet: hold a full cooldown so the first telegraph lands one
     // firstTelegraphDelay after the fight actually starts, not after the crowd

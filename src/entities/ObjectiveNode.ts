@@ -19,6 +19,7 @@ export class ObjectiveNode {
   private mesh: THREE.Mesh;
   private plate: NumberPlate;
   private breaking = -1;
+  private punch = 0;
 
   constructor(seg: Segment) {
     this.x = seg.x ?? 0;
@@ -56,6 +57,7 @@ export class ObjectiveNode {
 
   takeDamage(d: number): void {
     if (!this.alive) return;
+    if (this.punch < 0.35) this.punch = 1; // re-arm once decayed so sustained fire flinches, not bulges
     this.hp -= d;
     if (this.hp <= 0) {
       this.hp = 0;
@@ -68,13 +70,16 @@ export class ObjectiveNode {
 
   update(dt: number, cam: THREE.Camera): void {
     this.plate.faceCamera(cam);
+    if (this.punch > 0) this.punch = Math.max(0, this.punch - dt * 8);
     if (this.breaking >= 0) {
       this.breaking += dt;
       const k = Math.max(0, 1 - this.breaking * 3);
-      this.mesh.scale.setScalar(k);
+      this.mesh.scale.setScalar(k); // breaking owns mesh.scale — punch stays out of it
       this.plate.mesh.visible = false;
       if (k <= 0) this.group.visible = false;
+      return;
     }
+    this.mesh.scale.setScalar(1 + 0.06 * this.punch);
   }
 
   dispose(scene: THREE.Scene): void {

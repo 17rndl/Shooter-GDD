@@ -11,7 +11,7 @@
     "perUnitDamage": 1.0,
     "fireRate": 6.0,
     "dpsExponent": 0.85,
-    "maxVisibleBullets": 40,
+    "maxVisibleBullets": 120,
     "bulletSpeed": 38.0,
     "laneWidthPerUnit": 0.05,
     "laneWidthMax": 4.0,

@@ -106,6 +106,8 @@ export interface UpgradeLevels {
 export interface SaveData {
   currentLevel: number;
   coins: number;
+  /** Largest crowd ever reached across all runs — drives the NEW BEST badge. */
+  bestPeak: number;
   upgrades: UpgradeLevels;
   settings: { sound: boolean; haptics: boolean };
   ownedSkins: string[];

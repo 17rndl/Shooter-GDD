@@ -14,7 +14,10 @@ export class Finish {
   picked = false;
   pickedMultiplier = 1;
 
-  private cols: { centerX: number; mult: number; plate: NumberPlate; panel: THREE.Mesh }[] = [];
+  private cols: {
+    centerX: number; mult: number; plate: NumberPlate; panel: THREE.Mesh;
+    preview: NumberPlate; shattered: boolean;
+  }[] = [];
 
   constructor(seg: Segment, cfg: GameConfig) {
     this.z = seg.z;
@@ -45,7 +48,13 @@ export class Finish {
       plate.set(`×${mult}`);
       this.group.add(plate.mesh);
 
-      this.cols.push({ centerX, mult, plate, panel });
+      // coin payout this lane is worth right now; blank until setLanePreview runs
+      const preview = new NumberPlate(1.0, '#ffd24a');
+      preview.mesh.position.set(centerX, 0.85, this.laneZ + 0.05);
+      preview.mesh.visible = false;
+      this.group.add(preview.mesh);
+
+      this.cols.push({ centerX, mult, plate, panel, preview, shattered: false });
     }
 
     // finish banner arch
@@ -69,6 +78,20 @@ export class Finish {
     this.group.add(line);
   }
 
+  /**
+   * Coin value each lane pays right now, in authored lane order. The plates stay
+   * hidden until the first call; lanes already shattered by pickFor stay hidden.
+   */
+  setLanePreview(values: number[]): void {
+    const n = Math.min(values.length, this.cols.length);
+    for (let i = 0; i < n; i++) {
+      const c = this.cols[i];
+      if (c.shattered) continue;
+      c.preview.set(String(Math.max(0, Math.round(values[i] || 0))));
+      c.preview.mesh.visible = true;
+    }
+  }
+
   pickFor(centroidX: number): number {
     if (this.picked) return this.pickedMultiplier;
     this.picked = true;
@@ -87,6 +110,8 @@ export class Finish {
       if (c !== chosen) {
         (c.panel.material as THREE.MeshStandardMaterial).opacity = 0.05;
         c.plate.mesh.visible = false;
+        c.preview.mesh.visible = false;
+        c.shattered = true;
       }
     }
     this.pickedMultiplier = chosen.mult;
@@ -94,12 +119,12 @@ export class Finish {
   }
 
   update(_dt: number, cam: THREE.Camera): void {
-    for (const c of this.cols) c.plate.faceCamera(cam);
+    for (const c of this.cols) { c.plate.faceCamera(cam); c.preview.faceCamera(cam); }
   }
 
   dispose(scene: THREE.Scene): void {
     scene.remove(this.group);
-    for (const c of this.cols) c.plate.dispose();
+    for (const c of this.cols) { c.plate.dispose(); c.preview.dispose(); }
     disposeTree(this.group);
   }
 }

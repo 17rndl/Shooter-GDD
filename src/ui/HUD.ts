@@ -1,6 +1,22 @@
 // Thin DOM controller for the heads-up display. Game logic stays in systems;
 // this just reflects state and fires button callbacks.
 
+import { clamp } from '../util/MathUtil';
+
+const COIN_COUNT_DURATION = 1.0; // seconds for the reward coin roll-up
+const COIN_TICK_INTERVAL = 0.06; // seconds between onCoinTick calls during it
+
+export interface RewardCeremonyOpts {
+  survivors: number;
+  mult: number;
+  coins: number;
+  best: number;
+  isNewBest: boolean;
+  onNext: () => void;
+  onDouble: () => void;
+  onShop: () => void;
+}
+
 export interface OverlayOpts {
   title: string;
   body?: string;
@@ -19,6 +35,7 @@ export class HUD {
   private coins = document.getElementById('coins')!;
   private progressFill = document.getElementById('progress-fill')!;
   private countEl = document.getElementById('crowd-count')!;
+  private vignette = document.getElementById('vignette')!;
   private popups = document.getElementById('popups')!;
   private hint = document.getElementById('hint')!;
   private overlay = document.getElementById('overlay')!;
@@ -32,7 +49,30 @@ export class HUD {
   private flashEl: HTMLDivElement;
   private bossWrap: HTMLDivElement;
   private bossFill: HTMLDivElement;
-  private lastCount = -1;
+
+  /** Fired every time the *displayed* count ticks over an integer. */
+  onCountTick: ((value: number, rising: boolean) => void) | null = null;
+  /** Fired repeatedly while the reward coin total counts up. */
+  onCoinTick: (() => void) | null = null;
+
+  // crowd-count roll-up state (driven by update())
+  private countTarget = 0;
+  private countShown = 0;
+  private countFrom = 0;
+  private countTime = 0;
+  private countDur = 0; // 0 == idle
+  private countPop = 1;
+  private popTimer = 0;
+  private danger = false;
+
+  // reward-ceremony coin roll-up state (driven by update())
+  private coinTarget = 0;
+  private coinShown = -1;
+  private coinTime = 0;
+  private coinDur = 0; // 0 == idle
+  private coinAccum = 0;
+  private coinNumEl: HTMLElement | null = null;
+  private coinTagEl: HTMLElement | null = null;
 
   constructor() {
     // screen flash
@@ -65,14 +105,95 @@ export class HUD {
     this.progressFill.style.width = `${Math.max(0, Math.min(1, frac)) * 100}%`;
   }
 
-  setCount(n: number): void {
-    if (n === this.lastCount) return;
-    this.lastCount = n;
-    this.countEl.textContent = String(n);
+  /**
+   * The genre signature: the displayed number rolls toward `n` instead of
+   * snapping, so a ×5 gate reads as a visible climb. Ease-out and never longer
+   * than 0.6s so it stays snappy; the arrival punch scales with the jump.
+   */
+  setCount(n: number, instant = false): void {
+    const v = Math.round(n);
+    if (instant) {
+      this.countTarget = v;
+      this.countDur = 0;
+      const jump = Math.abs(v - this.countShown);
+      if (jump === 0) return;
+      this.renderCount(v);
+      this.popCount(this.popScaleFor(jump));
+      return;
+    }
+    if (v === this.countTarget) return;
+    this.countTarget = v;
+    const delta = Math.abs(v - this.countShown);
+    if (delta === 0) { this.countDur = 0; return; }
+    this.countFrom = this.countShown;
+    this.countTime = 0;
+    this.countDur = clamp(0.12 + delta * 0.004, 0.12, 0.6);
+    this.countPop = this.popScaleFor(delta);
+  }
+
+  /** Must be called every frame — drives the count and coin roll-ups. */
+  update(dt: number): void {
+    if (this.countDur > 0) {
+      this.countTime += dt;
+      const t = Math.min(1, this.countTime / this.countDur);
+      const k = 1 - t;
+      const e = 1 - k * k * k; // ease-out cubic
+      this.renderCount(Math.round(this.countFrom + (this.countTarget - this.countFrom) * e));
+      if (t >= 1) {
+        this.countDur = 0;
+        this.popCount(this.countPop);
+      }
+    }
+
+    if (this.coinDur > 0) {
+      this.coinTime += dt;
+      this.coinAccum += dt;
+      const t = Math.min(1, this.coinTime / this.coinDur);
+      const k = 1 - t;
+      this.renderCoins(Math.round(this.coinTarget * (1 - k * k)));
+      while (this.coinAccum >= COIN_TICK_INTERVAL) {
+        this.coinAccum -= COIN_TICK_INTERVAL;
+        if (this.coinTarget > 0) this.onCoinTick?.();
+      }
+      if (t >= 1) {
+        this.coinDur = 0;
+        this.coinAccum = 0;
+        this.revealDouble();
+      }
+    }
+  }
+
+  /** 1.15 for a ±1 nudge up to ~1.5 for a ±100 swing. */
+  private popScaleFor(delta: number): number {
+    return 1.15 + 0.35 * Math.sqrt(clamp((Math.abs(delta) - 1) / 99, 0, 1));
+  }
+
+  private renderCount(v: number): void {
+    if (v === this.countShown) return;
+    const rising = v > this.countShown;
+    this.countShown = v;
+    this.countEl.textContent = String(v);
+    this.onCountTick?.(v, rising);
+  }
+
+  private popCount(scale: number): void {
+    this.countEl.style.setProperty('--pop', String(scale));
     this.countEl.classList.remove('pop');
     void this.countEl.offsetWidth; // reflow to restart animation
     this.countEl.classList.add('pop');
-    setTimeout(() => this.countEl.classList.remove('pop'), 90);
+    if (this.popTimer !== 0) clearTimeout(this.popTimer);
+    this.popTimer = setTimeout(() => {
+      this.popTimer = 0;
+      this.countEl.classList.remove('pop');
+    }, 90);
+  }
+
+  /** Red edge vignette + pulsing count: "you are about to be wiped out". */
+  setDanger(on: boolean): void {
+    if (on === this.danger) return;
+    this.danger = on;
+    this.vignette.classList.toggle('on', on);
+    this.countEl.classList.toggle('danger', on);
   }
 
   setHint(visible: boolean): void {
@@ -102,7 +223,70 @@ export class HUD {
     this.bossFill.style.width = `${Math.max(0, Math.min(1, frac)) * 100}%`;
   }
 
+  /**
+   * The payoff beat. NEXT LEVEL is live immediately — only the ×2 offer waits
+   * for the coin roll-up, so the ceremony never holds the player hostage.
+   */
+  showRewardCeremony(o: RewardCeremonyOpts): void {
+    const bestHTML = o.isNewBest
+      ? `<div class="best-badge">NEW BEST · ${o.best}</div>`
+      : `<div class="best-line">Best: ${o.best}</div>`;
+    this.showOverlay({
+      title: 'LEVEL CLEAR!',
+      body: `${o.survivors} survivors · ×${o.mult} lane`,
+      extraHTML:
+        '<div class="reward-coins">+<span id="reward-coin-num">0</span> ●' +
+        '<span id="reward-coin-tag" class="coin-tag hidden">doubled!</span></div>' + bestHTML,
+      btnText: 'NEXT LEVEL',
+      onBtn: o.onNext,
+      btn2Text: '×2 COINS (AD)',
+      onBtn2: o.onDouble,
+      btn3Text: '🛒 SHOP',
+      onBtn3: o.onShop,
+    });
+    this.coinNumEl = document.getElementById('reward-coin-num');
+    this.coinTagEl = document.getElementById('reward-coin-tag');
+    this.overlayBtn2.classList.add('reveal');
+    this.coinTarget = Math.max(0, Math.round(o.coins));
+    this.coinShown = -1;
+    this.coinTime = 0;
+    this.coinAccum = 0;
+    this.coinDur = COIN_COUNT_DURATION;
+    this.renderCoins(0);
+  }
+
+  /** Rewrite the coin line without rebuilding the overlay (post rewarded-ad). */
+  setRewardCoins(coins: number, doubled: boolean): void {
+    this.coinDur = 0;
+    this.coinAccum = 0;
+    this.coinShown = -1;
+    this.renderCoins(Math.max(0, Math.round(coins)));
+    this.coinTagEl?.classList.toggle('hidden', !doubled);
+    if (doubled) {
+      // the ×2 offer is spent — never leave a live button that can be claimed twice
+      this.overlayBtn2.classList.add('hidden');
+      this.overlayBtn2.onclick = null;
+    } else {
+      this.revealDouble();
+    }
+  }
+
+  private renderCoins(v: number): void {
+    if (v === this.coinShown) return;
+    this.coinShown = v;
+    if (this.coinNumEl) this.coinNumEl.textContent = String(v);
+  }
+
+  private revealDouble(): void {
+    if (!this.overlayBtn2.classList.contains('reveal')) return;
+    this.overlayBtn2.classList.add('shown');
+  }
+
   showOverlay(o: OverlayOpts): void {
+    this.coinDur = 0;
+    this.coinNumEl = null;
+    this.coinTagEl = null;
+    this.overlayBtn2.classList.remove('reveal', 'shown');
     this.overlayTitle.textContent = o.title;
     this.overlayBody.innerHTML = o.body ?? '';
     this.overlayExtra.innerHTML = o.extraHTML ?? '';
@@ -129,5 +313,6 @@ export class HUD {
 
   hideOverlay(): void {
     this.overlay.classList.remove('show');
+    this.coinDur = 0; // a dismissed ceremony must not keep ticking coins
   }
 }

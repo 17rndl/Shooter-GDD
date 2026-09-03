@@ -5,6 +5,7 @@ const KEY = 'csr_save_v1';
 const DEFAULT_SAVE: SaveData = {
   currentLevel: 1,
   coins: 0,
+  bestPeak: 0,
   upgrades: { bulletPower: 0, fireRate: 0, startingCrowd: 0, income: 0 },
   settings: { sound: true, haptics: true },
   ownedSkins: ['default'],

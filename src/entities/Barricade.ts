@@ -16,8 +16,10 @@ export class Barricade {
   passed = false;
 
   private box: THREE.Mesh;
+  private stripe: THREE.Mesh;
   private plate: NumberPlate;
   private breaking = -1;
+  private punch = 0;
   private readonly ramFactor: number;
 
   constructor(seg: Segment, cfg?: GameConfig) {
@@ -40,12 +42,12 @@ export class Barricade {
     this.group.add(this.box);
 
     // red warning stripe
-    const stripe = new THREE.Mesh(
+    this.stripe = new THREE.Mesh(
       new THREE.BoxGeometry(width + 0.02, 0.18, 0.72),
       new THREE.MeshStandardMaterial({ color: 0xff5a52, emissive: 0x551210, roughness: 0.7 }),
     );
-    stripe.position.set(this.x, h - 0.2, this.z);
-    this.group.add(stripe);
+    this.stripe.position.set(this.x, h - 0.2, this.z);
+    this.group.add(this.stripe);
 
     this.plate = new NumberPlate(1.3, '#ffffff');
     this.plate.mesh.position.set(this.x, h + 0.55, this.z);
@@ -60,6 +62,7 @@ export class Barricade {
 
   takeDamage(d: number): void {
     if (!this.alive) return;
+    if (this.punch < 0.35) this.punch = 1; // re-arm once decayed so sustained fire flinches, not bulges
     this.hp -= d;
     if (this.hp <= 0) {
       this.hp = 0;
@@ -82,13 +85,22 @@ export class Barricade {
 
   update(dt: number, cam: THREE.Camera): void {
     this.plate.faceCamera(cam);
+    if (this.punch > 0) this.punch = Math.max(0, this.punch - dt * 8);
     if (this.breaking >= 0) {
       this.breaking += dt;
       const k = Math.max(0, 1 - this.breaking * 4);
+      // breaking owns the body scale — punch stays out of it
       this.box.scale.setScalar(k);
+      this.stripe.scale.setScalar(k);
       this.plate.mesh.visible = false;
       if (k <= 0) this.group.visible = false;
+      return;
     }
+    // The stripe clears the box by only 0.01 per side, so it must take the same
+    // scale or the punched box swallows it for as long as the wall is under fire.
+    const punchScale = 1 + 0.06 * this.punch;
+    this.box.scale.setScalar(punchScale);
+    this.stripe.scale.setScalar(punchScale);
   }
 
   dispose(scene: THREE.Scene): void {

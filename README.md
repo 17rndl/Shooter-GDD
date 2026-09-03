@@ -93,6 +93,25 @@ reload, no recompile. Add levels by dropping more `level_00N.json` files and poi
 The chase camera looks down +Z, which mirrors world-X on screen. Input is inverted so
 **drag-right = crowd-moves-right**, and gate `left`/`right` in JSON map to screen left/right.
 
+### Feel pass — the arc made visible
+
+The audit's second verdict: *the numbers change but the world doesn't*. The feel pass gives every
+beat of the arc a physical signal, all pooled and allocation-free:
+
+- **Growth you can see** — new units scale in with an overshoot that ripples outward through the
+  formation; above the render cap the crowd swells (unit size + spacing ∝ log count) so 1000 reads
+  bigger than 100; **tracer density scales with √count**, so a 5-crowd and a 500-crowd look nothing alike.
+- **The count rolls up**, not teleports — an eased tween with a pitched tick per step and an arrival
+  pop proportional to the delta (the genre's signature dopamine beat).
+- **Loss and impact have bodies** — dying units pop off the formation's edge and fall; bullets spark
+  on arrival; targets flinch (scale-punch) on every hit; a barricade shot down flashes white with a
+  BREAK pop, a rammed one flashes red with the loss — and a dodged one is left standing, so the
+  three outcomes read as three different lessons.
+- **Danger is felt** — at ≤5 units a red vignette closes in and a heartbeat plays, so the revive
+  offer lands with setup instead of surprise. Best-ever crowd is persisted and celebrated.
+- **Payoff has ceremony** — coins count up with blips before the ×2 ad button is revealed; finish
+  lanes preview the coins they're worth as you approach; the boss's chip damage has an audible cue.
+
 ## Not yet built (GDD phases 8–10, post-MVP)
 Extra juice polish + unit **skins** (cosmetic), real **ad SDK** wiring (AppLovin MAX behind the
 existing `IAdService`), **IAP**, **haptics**, and the **Unity/URP port** for Android `.aab` (the

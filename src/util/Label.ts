@@ -77,6 +77,8 @@ export class NumberPlate {
   /** Billboard toward the camera (keep upright). */
   faceCamera(cam: THREE.Camera): void {
     this.mesh.quaternion.copy(cam.quaternion);
+    // runs every frame, so a value parked by the throttle can never go stale
+    if (this.pending !== null && performance.now() - this.lastDraw >= REDRAW_MS) this.set(this.pending);
   }
 
   dispose(): void {
