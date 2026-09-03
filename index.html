@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <meta name="theme-color" content="#0a0e1a" />
+    <title>Crowd Shooter Runner</title>
+    <style>
+      :root {
+        --blue: #4ea3ff;
+        --green: #5ce06a;
+        --red: #ff5a52;
+        --gold: #ffd24a;
+        --ink: #0a0e1a;
+      }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 100%; height: 100%; overflow: hidden; background: var(--ink); }
+      body {
+        font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent;
+        touch-action: none;
+      }
+
+      /* Portrait play area, centered, letterboxed on wide screens. */
+      #app {
+        position: absolute; inset: 0; margin: auto;
+        width: min(100vw, 56.25vh);   /* 9:16 */
+        height: min(100vh, 177.78vw);
+        background: var(--ink);
+        overflow: hidden;
+      }
+      #gl { display: block; width: 100%; height: 100%; }
+
+      /* ---------- HUD ---------- */
+      #hud { position: absolute; inset: 0; pointer-events: none; color: #fff; }
+
+      /* top: level + progress */
+      #topbar {
+        position: absolute; top: 0; left: 0; right: 0;
+        padding: 14px 16px 10px;
+        display: flex; align-items: center; gap: 10px;
+        background: linear-gradient(180deg, rgba(0,0,0,0.35), transparent);
+      }
+      #level-label { font-weight: 800; font-size: 14px; letter-spacing: 0.5px; opacity: 0.9; }
+      #progress-track {
+        flex: 1; height: 8px; border-radius: 999px;
+        background: rgba(255,255,255,0.18); overflow: hidden;
+      }
+      #progress-fill {
+        height: 100%; width: 0%;
+        background: linear-gradient(90deg, var(--blue), var(--green));
+        border-radius: 999px; transition: width 0.12s linear;
+      }
+      #coins {
+        position: absolute; top: 12px; right: 14px;
+        font-weight: 800; font-size: 16px; color: var(--gold);
+        text-shadow: 0 2px 6px rgba(0,0,0,0.5);
+        display: flex; align-items: center; gap: 5px;
+      }
+      #coins::before { content: "●"; color: var(--gold); }
+
+      /* bottom-center: live crowd count */
+      #crowd-count {
+        position: absolute; left: 50%; bottom: 24px; transform: translateX(-50%);
+        font-weight: 900; font-size: 44px; line-height: 1;
+        color: #fff; text-shadow: 0 3px 0 rgba(0,0,0,0.35), 0 6px 18px rgba(0,0,0,0.5);
+        transition: transform 0.08s ease-out;
+      }
+      #crowd-count.pop { transform: translateX(-50%) scale(1.35); }
+
+      /* floating popups layer */
+      #popups { position: absolute; inset: 0; overflow: hidden; }
+      .popup {
+        position: absolute; font-weight: 900; font-size: 22px;
+        text-shadow: 0 2px 6px rgba(0,0,0,0.6);
+        transform: translate(-50%, -50%); will-change: transform, opacity;
+        animation: floatUp 0.9s ease-out forwards;
+      }
+      @keyframes floatUp {
+        0%   { opacity: 0; transform: translate(-50%, -30%) scale(0.6); }
+        20%  { opacity: 1; transform: translate(-50%, -55%) scale(1.1); }
+        100% { opacity: 0; transform: translate(-50%, -120%) scale(1.0); }
+      }
+
+      /* center overlay screens (menu / win / lose) */
+      #overlay {
+        position: absolute; inset: 0; display: none;
+        flex-direction: column; align-items: center; justify-content: center;
+        gap: 18px; text-align: center; padding: 24px;
+        background: rgba(6,10,22,0.72); backdrop-filter: blur(3px);
+        pointer-events: auto;
+      }
+      #overlay.show { display: flex; }
+      #overlay h1 { font-size: 34px; font-weight: 900; letter-spacing: 0.5px; }
+      #overlay p { font-size: 16px; opacity: 0.85; max-width: 30ch; line-height: 1.4; }
+      .btn {
+        pointer-events: auto; cursor: pointer; border: none; border-radius: 14px;
+        padding: 14px 28px; font-size: 17px; font-weight: 800; color: #06122a;
+        background: linear-gradient(180deg, #7dd3ff, var(--blue));
+        box-shadow: 0 6px 0 #2b6fb0, 0 10px 18px rgba(0,0,0,0.4);
+        transition: transform 0.06s ease, box-shadow 0.06s ease;
+      }
+      .btn:active { transform: translateY(4px); box-shadow: 0 2px 0 #2b6fb0, 0 6px 12px rgba(0,0,0,0.4); }
+      .btn.gold { background: linear-gradient(180deg, #ffe58a, var(--gold)); box-shadow: 0 6px 0 #b58a13, 0 10px 18px rgba(0,0,0,0.4); }
+      .btn.gold:active { box-shadow: 0 2px 0 #b58a13, 0 6px 12px rgba(0,0,0,0.4); }
+      .btn.ghost { background: rgba(255,255,255,0.14); color: #fff; box-shadow: none; border: 1px solid rgba(255,255,255,0.25); }
+      .reward-coins { font-size: 30px; font-weight: 900; color: var(--gold); }
+
+      #hint {
+        position: absolute; left: 50%; bottom: 90px; transform: translateX(-50%);
+        font-size: 14px; opacity: 0.7; text-align: center; width: 80%;
+        animation: pulse 1.6s ease-in-out infinite;
+      }
+      @keyframes pulse { 0%,100%{opacity:0.45} 50%{opacity:0.85} }
+
+      .hidden { display: none !important; }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <canvas id="gl"></canvas>
+      <div id="hud">
+        <div id="topbar">
+          <span id="level-label">LEVEL 1</span>
+          <div id="progress-track"><div id="progress-fill"></div></div>
+        </div>
+        <div id="coins">0</div>
+        <div id="popups"></div>
+        <div id="crowd-count">0</div>
+        <div id="hint">Drag left / right to steer</div>
+
+        <div id="overlay">
+          <h1 id="overlay-title">Crowd Shooter Runner</h1>
+          <p id="overlay-body">Drag to steer your crowd. Pick good gates, smash through, beat the boss.</p>
+          <div id="overlay-extra"></div>
+          <button id="overlay-btn" class="btn">TAP TO START</button>
+          <button id="overlay-btn2" class="btn ghost hidden"></button>
+          <button id="overlay-btn3" class="btn ghost hidden"></button>
+        </div>
+      </div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

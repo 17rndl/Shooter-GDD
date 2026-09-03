@@ -1,0 +1,32 @@
+{
+  "id": 2,
+  "length": 280,
+  "forwardSpeed": 8.0,
+  "segments": [
+    { "z": 22, "type": "gate_pair",
+      "left":  { "op": "mul", "value": 2 },
+      "right": { "op": "add", "value": 12 } },
+
+    { "z": 48, "type": "barricade", "x": -1.0, "hp": 90, "width": 2.2 },
+
+    { "z": 74, "type": "enemy_crowd", "x": 1.2, "count": 40, "fireRate": 4.5 },
+
+    { "z": 100, "type": "gate_pair",
+      "left":  { "op": "add", "value": 25 },
+      "right": { "op": "mul", "value": 2 } },
+
+    { "z": 128, "type": "objective_node", "x": 1.3, "hp": 260, "reward": 30 },
+
+    { "z": 156, "type": "gate_pair",
+      "left":  { "op": "div", "value": 2 },
+      "right": { "op": "mul", "value": 2 } },
+
+    { "z": 184, "type": "enemy_crowd", "x": -1.2, "count": 80, "fireRate": 5.0 },
+
+    { "z": 208, "type": "barricade", "x": 0.6, "hp": 140, "width": 2.0 },
+
+    { "z": 238, "type": "boss", "hp": 2200, "attacks": ["sweep_fire"] },
+
+    { "z": 268, "type": "finish", "multiplierLanes": [2, 3, 5] }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "track": { "minX": -3.0, "maxX": 3.0, "forwardSpeed": 7.0, "width": 6.0 },
+  "crowd": {
+    "startingCount": 5,
+    "maxVisibleUnits": 100,
+    "formationSpacing": 0.42,
+    "steerSmoothing": 12.0,
+    "unitRadius": 0.22
+  },
+  "combat": {
+    "perUnitDamage": 1.0,
+    "fireRate": 6.0,
+    "dpsExponent": 0.85,
+    "maxVisibleBullets": 40,
+    "bulletSpeed": 38.0,
+    "laneWidthPerUnit": 0.05,
+    "laneWidthMax": 4.0,
+    "engageRange": 22.0
+  },
+  "economy": { "coinPerUnit": 2, "upgradeCostBase": 50, "upgradeCostGrowth": 1.35 }
+}
