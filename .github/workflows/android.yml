@@ -127,7 +127,8 @@ jobs:
           {
             echo "## Debug APK badging"
             echo '```'
-            grep -E '^(package|sdkVersion|targetSdkVersion|uses-permission|application-label|launchable-activity):' <<< "$badging" || true
+            # aapt2 reports the min SDK as minSdkVersion (aapt1 called it sdkVersion).
+            grep -E '^(package|sdkVersion|minSdkVersion|targetSdkVersion|uses-permission|application-label|launchable-activity):' <<< "$badging" || true
             grep -E 'android\.hardware\.screen\.(portrait|landscape)' <<< "$badging" || true
             echo "orientation: $orientation"
             echo '```'
