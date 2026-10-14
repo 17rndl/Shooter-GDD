@@ -7,6 +7,10 @@ Built with **TypeScript + Three.js + Vite** — the GDD's recommended "validate 
 in-browser" path (Claude Code can build, run, and verify this end-to-end; it cannot drive
 the Unity editor). The shippable target stays Unity; this proves out the design and tuning.
 
+It is a **web app**, not a native app and not React Native (there is no React anywhere): it
+runs in a browser, with a plain-DOM HUD over a WebGL canvas. The ship target is a native
+**Unity (C#) Android** build; [`docs/UNITY_PORT.md`](docs/UNITY_PORT.md) is the port guide.
+
 ## Run it
 
 ```bash
@@ -63,35 +67,52 @@ inflated for free on a wall-clock timer. The balance overhaul:
   balance regression test — retune numbers until it passes.
 
 Plus juice (camera shake, FOV punch on big multiplies, pop-ups, zero-asset WebAudio SFX) and
-services behind interfaces with no-op stubs: `SaveService` (localStorage), `AudioService`,
-`IAdService` (`AdServiceStub` → swap in AppLovin MAX / AdMob later).
+services behind interfaces with stubs (see the meta & services pass below).
 
 ## Architecture (mirrors GDD §13)
 
 ```
 src/
-  core/GameManager.ts      state machine (MENU→PLAYING→BOSS→WIN→REWARD / LOSE→revive) + system tick order
+  main.ts                  boot (config → level manifest → GameManager), failed-boot screen
+  core/GameManager.ts      state machine (MENU→PLAYING⇄BOSS→WIN→REWARD / LOSE→revive), pause,
+                           ad/visibility hooks, system tick order
+  core/WorldSpace.ts       WORLD_X_SIGN + screenToWorldX: the one place that knows the X mirror
   systems/InputSystem.ts   drag → normalized steer
   crowd/                   CrowdController (count + formation + DPS), UnitInstancer (GPU-instanced units)
-  combat/BulletPool.ts     capped pooled visual tracers
-  entities/                GatePair, Barricade, EnemyCrowd, ObjectiveNode, Boss, Finish
+  combat/BulletPool.ts     capped pooled visual tracers (tinted by the equipped skin)
+  combat/ParticlePool.ts   pooled sparks, death pops
+  entities/                GatePair, Barricade, EnemyCrowd, ObjectiveNode, Boss, Finish, Pickup
   world/Track.ts           ground, rails, depth cues
-  ui/HUD.ts                DOM overlay (count, coins, progress, popups, boss bar, overlays)
-  ui/ShopPanel.ts          upgrades shop (coin sink → run-start stat buffs)
-  services/                Save / Audio / Ad (interface-first, stubbed)
+  ui/HUD.ts                DOM overlay (count, coins, progress, popups, boss bar, overlays, gear)
+  ui/ShopPanel.ts          shop: UPGRADES (coin sink) / SKINS (cosmetic) / STORE (IAP)
+  ui/SettingsPanel.ts      settings sheet, doubles as the in-run pause menu
+  services/SaveService.ts      localStorage save + sanitize/migrate (sanitizeSave)
+  services/AudioService.ts     WebAudio SFX + procedural 3-intensity music loop
+  services/HapticsService.ts   IHapticsService → navigator.vibrate, priority throttle
+  services/AdService.ts        IAdService (SDK adapter, stubbed) + AdGate (every ad rule)
+  services/IapService.ts       IIapService (store adapter, stubbed)
   data/types.ts            config / level / save contracts
+  data/ConfigLoader.ts     loadConfig + validateConfig (missing sections fail the boot)
+  data/LevelRepository.ts  ILevelRepository, manifest wrap + cache, validateLevel
   util/                    MathUtil (phyllotaxis, damp), Label (canvas-texture number plates)
 public/
-  config.json              all tuning numbers (GDD §14.1 / §15)
+  config.json              all tuning numbers (GDD §14.1 / §15), skins, ad cadence
+  levels/index.json        level manifest: {"levels": [...]} in play order
   levels/level_00{1,2,3}.json   JSON-driven levels, scaling difficulty (GDD §14.2)
+scripts/balance-sim.mjs    balance regression test (`npm run balance`)
+docs/UNITY_PORT.md         Unity port guide
 ```
 
 Every tuning value lives in `config.json`; the level is data in `level_001.json` — edit and
-reload, no recompile. Add levels by dropping more `level_00N.json` files and pointing the loader at them.
+reload, no recompile. Add a level by dropping in `level_00N.json` and listing it in
+`levels/index.json`; it is validated on load (a broken file fails with its name, segment
+index and the bad field).
 
 ### Steering / camera note
-The chase camera looks down +Z, which mirrors world-X on screen. Input is inverted so
-**drag-right = crowd-moves-right**, and gate `left`/`right` in JSON map to screen left/right.
+The chase camera looks down +Z, which mirrors world-X on screen (world +X is screen-left in
+right-handed Three.js). `src/core/WorldSpace.ts` owns that flip (`WORLD_X_SIGN = -1`): steering,
+gate doors and finish lanes all go through `screenToWorldX`, so **drag-right = crowd-moves-right**
+and gate `left`/`right` in JSON map to screen left/right. A left-handed engine (Unity) sets +1.
 
 ### Feel pass — the arc made visible
 
@@ -127,11 +148,51 @@ beat of the arc a physical signal, all pooled and allocation-free:
   a costly fight: all authored in the level JSON, no engine changes. The balance sim models
   pickups, split fire and both attacks, and still has to pass.
 
-## Not yet built (GDD phases 8–10, post-MVP)
-Extra juice polish + unit **skins** (cosmetic), real **ad SDK** wiring (AppLovin MAX behind the
-existing `IAdService`), **IAP**, **haptics**, and the **Unity/URP port** for Android `.aab` (the
-actual ship target). The data formats and service interfaces here are designed to carry straight over.
+### Meta & services pass — the shell around the run, and port prep
+
+- **Skins** — five cosmetic unit skins in `config.json` (`skins`: body colour, tracer tint,
+  price), bought and equipped in the shop's SKINS tab. The equipped skin tints the crowd, its
+  tracers and their impact sparks; hues stay clear of enemy orange, hazard red and coin gold so
+  a skin never reads as a threat or a pickup. An unknown saved id falls back to Classic.
+- **Settings + pause** — a gear button (top-left) opens Settings on the menu (Sound FX, Music,
+  Haptics, and a two-tap RESET PROGRESS that keeps those settings and a bought Remove Ads);
+  mid-run it becomes a pause button and the same sheet is the pause menu (RESUME / QUIT TO
+  MENU). Pausing freezes the whole world, not just the sim. Backgrounding the app (tab switch,
+  lock screen) pauses a live run and silences audio.
+- **Music** — a procedural WebAudio loop with three intensities that change on the bar line:
+  calm on menus and result screens, driving in the run, opened-up and faster at the boss.
+- **Haptics** — `IHapticsService` (`navigator.vibrate` on the web) pulses on gates, rams, boss
+  hits, the boss kill, win and lose, with a priority throttle so a spray of small hits can
+  never drown a boss kill. Not on coins or per-bullet hits.
+- **AdGate** — every ad rule lives in one pure-TS class in front of the SDK adapter: single
+  flight, open/close always balanced (the game freezes and audio suspends while an ad is up),
+  a load timeout so an ad that never shows can never freeze the game (once it is on screen only
+  a long backstop applies, so a full video never loses its reward), late results ignored, and
+  interstitial caps (every N clears, a minimum interval, skipped with Remove Ads). Rewarded
+  buttons show LOADING... while an ad runs (the screen's other buttons disable with it) and are
+  hidden when there is no fill. New rewarded placement (GDD §10): **+N START CROWD** on the menu.
+- **IAP stub** — the shop's STORE tab (Remove Ads, two coin packs, RESTORE PURCHASES) runs
+  against `IIapService`; the stub approves everything. Granting is the game's job, so a real
+  store's receipt check slots in behind the interface.
+- **Port prep** — `WORLD_X_SIGN` isolates the camera mirror; `LevelRepository` loads levels
+  from a manifest (an object, so Unity's `JsonUtility` can read it), wraps for endless mode,
+  caches, and validates every file; `ConfigLoader` fails the boot on a missing config section.
+  [`docs/UNITY_PORT.md`](docs/UNITY_PORT.md) maps every file to its Unity home and lists the
+  JS-vs-C# numeric traps the balance sim depends on.
+
+## Not yet built
+- Real **AppLovin MAX** wiring behind `IAdService` and **Unity IAP / Play Billing** behind
+  `IIapService` (receipt validation included); the stubs and AdGate rules are ready for them.
+- The **Unity 6 / URP port** for an Android `.aab` itself (the actual ship target), following
+  `docs/UNITY_PORT.md`.
+- **Art**: real unit, enemy and boss models and VFX in place of the primitive shapes.
 
 ## Dev/debug
-`window.__game` is exposed in the browser console: `__game.debug()` dumps live state,
-`__game.debugSteer(0..1)` drives the steer target. Harmless; strip for production.
+`window.__game` is exposed in the browser console: `__game.debug()` dumps live state (now
+including `paused`, `adOpen`, `adBusy`, `skin`, `music`, `settings`, `removeAds`,
+`levelCount`), `__game.debugSteer(0..1)` drives the steer target. Harmless; strip for production.
+
+Ad test flags (query string, stub SDK only):
+- `?adfail`: rewarded ads finish without granting a reward.
+- `?adnofill`: no ad is ever ready, so the rewarded buttons are hidden and interstitials are skipped.
+- `?adhang`: a rewarded ad never shows or calls back, which exercises AdGate's load timeout (`ads.rewardedTimeoutSec`).

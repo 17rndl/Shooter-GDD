@@ -6,7 +6,7 @@
 // the boss) — and asserts the GDD rule: BEST beats the boss with margin, WORST
 // dies before the finish.
 //
-// The formulas below MUST mirror src/ (CrowdController, EnemyCrowd, GatePair,
+// The formulas below MUST mirror src/ (WorldSpace, CrowdController, EnemyCrowd, GatePair,
 // Boss, Pickup, GameManager). If a mechanic changes there, change it here too.
 // ---------------------------------------------------------------------------
 import { readFileSync, readdirSync } from 'node:fs';
@@ -88,6 +88,12 @@ const BOSS_ATTACKS = new Set(['sweep_fire', 'slam']);
 // to price the sweep. Change it only alongside boss.bandHalf / track.minX / maxX.
 const BAND_SEQUENCE = [-1.5, 0.75, -0.25, 1.5, 0, -1.0, 1.25];
 
+// Mirrors src/core/WorldSpace.ts: world +X renders on screen-left (right-handed
+// Three.js, camera looking +Z), so screen fractions flip before becoming world X.
+const WORLD_X_SIGN = -1;
+const screenToWorldX = (t01, minX, maxX) =>
+  (minX + maxX) / 2 + WORLD_X_SIGN * (t01 - 0.5) * (maxX - minX);
+
 // ---------------------------------------------------------------- formulas
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
 const lerp = (a, b, t) => a + (b - a) * t;
@@ -132,16 +138,15 @@ function buildWorld(level) {
     gates: [], barricades: [], enemies: [], objectives: [], pickups: [], boss: null, finish: null,
   };
   const { minX, maxX } = TRACK;
-  const mid = (minX + maxX) / 2;
   const gateHalfW = (maxX - minX) / 4;
 
   for (const seg of level.segments) {
     switch (seg.type) {
       case 'gate_pair': {
         const halves = [];
-        // Camera mirrors world X: authored "left" sits at world +X (see GatePair).
-        if (seg.left) halves.push({ ...seg.left, centerX: (mid + maxX) / 2, halfWidth: gateHalfW, accum: 0 });
-        if (seg.right) halves.push({ ...seg.right, centerX: (minX + mid) / 2, halfWidth: gateHalfW, accum: 0 });
+        // JSON left/right are screen sides; door centres as GatePair places them.
+        if (seg.left) halves.push({ ...seg.left, centerX: screenToWorldX(0.25, minX, maxX), halfWidth: gateHalfW, accum: 0 });
+        if (seg.right) halves.push({ ...seg.right, centerX: screenToWorldX(0.75, minX, maxX), halfWidth: gateHalfW, accum: 0 });
         w.gates.push({
           z: seg.z, halves, passed: false,
           tickable: !!seg.tickable, tickPerHit: seg.tickPerHit ?? 1, aim: -1,
@@ -511,16 +516,29 @@ function runPolicy(level, policy) {
 }
 
 // ---------------------------------------------------------------- report
-const levelFiles = readdirSync(join(ROOT, 'public', 'levels'))
-  .filter((f) => /^level_\d+\.json$/.test(f))
-  .sort();
+const LEVEL_DIR = join(ROOT, 'public', 'levels');
+
+/** Manifest order (what the game plays); a sorted directory scan if there is no manifest. */
+function listLevels() {
+  let manifest;
+  try {
+    manifest = JSON.parse(readFileSync(join(LEVEL_DIR, 'index.json'), 'utf8'));
+  } catch (err) {
+    if (err.code !== 'ENOENT') console.warn(`index.json unreadable (${err.message}); scanning ${LEVEL_DIR}`);
+  }
+  const files = manifest && Array.isArray(manifest.levels) ? manifest.levels : null;
+  if (files && files.length > 0 && files.every((f) => typeof f === 'string' && f.length > 0)) return files;
+  if (manifest) console.warn(`index.json has no usable "levels" list; scanning ${LEVEL_DIR}`);
+  return readdirSync(LEVEL_DIR).filter((f) => /^level_\d+\.json$/.test(f)).sort();
+}
+const levelFiles = listLevels();
 
 const rows = [];
 const failures = [];
 const traces = [];
 
 for (const file of levelFiles) {
-  const level = JSON.parse(readFileSync(join(ROOT, 'public', 'levels', file), 'utf8'));
+  const level = JSON.parse(readFileSync(join(LEVEL_DIR, file), 'utf8'));
   const best = runPolicy(level, 'best');
   const worst = runPolicy(level, 'worst');
 

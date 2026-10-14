@@ -17,6 +17,7 @@ export class BulletPool {
   readonly mesh: THREE.InstancedMesh;
   /** Fired where a bullet dies of old age in update(). clear() never calls it. */
   onExpire: ((x: number, y: number, z: number) => void) | null = null;
+  private readonly mat: THREE.MeshBasicMaterial;
   private bullets: Bullet[] = [];
   private cursor = 0;
   private m = new THREE.Matrix4();
@@ -27,8 +28,8 @@ export class BulletPool {
 
   constructor(capacity: number, color = 0xfff1a8, scene?: THREE.Scene) {
     const geo = new THREE.BoxGeometry(0.07, 0.07, 0.9);
-    const mat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.95 });
-    this.mesh = new THREE.InstancedMesh(geo, mat, capacity);
+    this.mat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.95 });
+    this.mesh = new THREE.InstancedMesh(geo, this.mat, capacity);
     this.mesh.frustumCulled = false;
     this.mesh.count = capacity;
     for (let i = 0; i < capacity; i++) {
@@ -112,9 +113,14 @@ export class BulletPool {
     }
   }
 
+  /** Tints every tracer, live ones included (one shared material). */
+  setColor(color: number): void {
+    this.mat.color.setHex(color);
+  }
+
   dispose(): void {
     this.mesh.geometry.dispose();
-    (this.mesh.material as THREE.Material).dispose();
+    this.mat.dispose();
     this.mesh.dispose();
   }
 }

@@ -45,6 +45,8 @@ export class HUD {
   private overlayBtn = document.getElementById('overlay-btn') as HTMLButtonElement;
   private overlayBtn2 = document.getElementById('overlay-btn2') as HTMLButtonElement;
   private overlayBtn3 = document.getElementById('overlay-btn3') as HTMLButtonElement;
+  private overlayBtns = [this.overlayBtn, this.overlayBtn2, this.overlayBtn3];
+  private gear = document.getElementById('gear') as HTMLButtonElement;
 
   private flashEl: HTMLDivElement;
   private bossWrap: HTMLDivElement;
@@ -54,6 +56,11 @@ export class HUD {
   onCountTick: ((value: number, rising: boolean) => void) | null = null;
   /** Fired repeatedly while the reward coin total counts up. */
   onCoinTick: (() => void) | null = null;
+  /** The gear / pause button was tapped. */
+  onGear: (() => void) | null = null;
+
+  // label each overlay button had before setButtonBusy(idx, true); null == not busy
+  private busyText: (string | null)[] = [null, null, null];
 
   // crowd-count roll-up state (driven by update())
   private countTarget = 0;
@@ -83,10 +90,10 @@ export class HUD {
     } as CSSStyleDeclaration);
     this.app.appendChild(this.flashEl);
 
-    // boss bar
+    // boss bar (clears the 56px top bar)
     this.bossWrap = document.createElement('div');
     Object.assign(this.bossWrap.style, {
-      position: 'absolute', top: '52px', left: '12%', right: '12%', height: '14px',
+      position: 'absolute', top: '60px', left: '12%', right: '12%', height: '14px',
       borderRadius: '999px', background: 'rgba(0,0,0,0.45)', border: '1px solid rgba(255,255,255,0.3)',
       overflow: 'hidden', display: 'none',
     } as CSSStyleDeclaration);
@@ -97,6 +104,55 @@ export class HUD {
     } as CSSStyleDeclaration);
     this.bossWrap.appendChild(this.bossFill);
     document.getElementById('hud')!.appendChild(this.bossWrap);
+
+    this.gear.addEventListener('click', () => this.onGear?.());
+  }
+
+  /** visibility, not display: the top bar must not reflow when the gear comes and goes. */
+  setGearVisible(on: boolean): void { this.gear.style.visibility = on ? '' : 'hidden'; }
+
+  /** Gear glyph on menus, pause glyph mid-run. index.html swaps the SVG off data-mode. */
+  setGearMode(mode: 'settings' | 'pause'): void {
+    this.gear.dataset.mode = mode;
+    this.gear.setAttribute('aria-label', mode === 'pause' ? 'Pause' : 'Settings');
+  }
+
+  /**
+   * Lock an overlay button while its async action (an ad) is in flight so it
+   * can't be tapped twice. The label comes back on busy=false.
+   */
+  setButtonBusy(idx: 1 | 2 | 3, busy: boolean): void {
+    const btn = this.overlayBtns[idx - 1];
+    if (busy) {
+      if (this.busyText[idx - 1] === null) this.busyText[idx - 1] = btn.textContent ?? '';
+      btn.textContent = 'LOADING...';
+      btn.disabled = true;
+      btn.setAttribute('aria-busy', 'true');
+      return;
+    }
+    const prev = this.busyText[idx - 1];
+    if (prev !== null) btn.textContent = prev;
+    this.busyText[idx - 1] = null;
+    btn.disabled = false;
+    btn.removeAttribute('aria-busy');
+  }
+
+  /**
+   * Disable the other overlay buttons while one is busy: the game ignores their
+   * taps until its ad settles, so they must not look live. Busy ones are left alone.
+   */
+  setButtonsLocked(locked: boolean): void {
+    for (let i = 0; i < this.overlayBtns.length; i++) {
+      if (this.busyText[i] === null) this.overlayBtns[i].disabled = locked;
+    }
+  }
+
+  private clearBusy(): void {
+    for (let i = 0; i < this.overlayBtns.length; i++) {
+      this.busyText[i] = null;
+      this.overlayBtns[i].disabled = false;
+      this.overlayBtns[i].removeAttribute('aria-busy');
+    }
   }
 
   setLevel(n: number): void { this.levelLabel.textContent = `LEVEL ${n}`; }
@@ -287,6 +343,7 @@ export class HUD {
     this.coinNumEl = null;
     this.coinTagEl = null;
     this.overlayBtn2.classList.remove('reveal', 'shown');
+    this.clearBusy(); // a fresh screen never inherits a stuck LOADING... (labels are rewritten below)
     this.overlayTitle.textContent = o.title;
     this.overlayBody.innerHTML = o.body ?? '';
     this.overlayExtra.innerHTML = o.extraHTML ?? '';

@@ -1,16 +1,21 @@
 import * as THREE from 'three';
-import type { GameConfig, GameState, LevelDefinition, Segment } from '../data/types';
+import type { GameConfig, GameState, LevelDefinition, Segment, SkinDef } from '../data/types';
+import { loadConfig } from '../data/ConfigLoader';
+import { FetchLevelRepository, wrapsFor, type ILevelRepository } from '../data/LevelRepository';
 import { clamp } from '../util/MathUtil';
 import { Track } from '../world/Track';
 import { CrowdController } from '../crowd/CrowdController';
 import { BulletPool } from '../combat/BulletPool';
 import { ParticlePool } from '../combat/ParticlePool';
 import { InputSystem } from '../systems/InputSystem';
-import { HUD } from '../ui/HUD';
+import { HUD, type OverlayOpts } from '../ui/HUD';
 import { ShopPanel } from '../ui/ShopPanel';
+import { SettingsPanel } from '../ui/SettingsPanel';
 import { SaveService } from '../services/SaveService';
-import { AudioService } from '../services/AudioService';
-import { AdServiceStub, type IAdService } from '../services/AdService';
+import { AudioService, type MusicIntensity } from '../services/AudioService';
+import { AdGate, AdServiceStub, type RewardKind } from '../services/AdService';
+import { IapServiceStub, type IIapService } from '../services/IapService';
+import { WebHapticsService, type IHapticsService } from '../services/HapticsService';
 import { GatePair, type GateResult } from '../entities/GatePair';
 import { Barricade } from '../entities/Barricade';
 import { EnemyCrowd } from '../entities/EnemyCrowd';
@@ -23,8 +28,14 @@ const BASE_FOV = 56;
 const CAM_BACK = 8.5;
 const CAM_HEIGHT = 6.2;
 const LOOK_AHEAD = 7;
-const AVAILABLE_LEVELS = 3;
-const INTERSTITIAL_EVERY = 2; // show an interstitial every N level completions
+// Classic skin, also the fallback when a config colour isn't '#rrggbb'
+// (ConfigLoader only warns about a malformed skin; it never fails the boot).
+const DEFAULT_UNIT_COLOR = 0x4ea3ff;
+const DEFAULT_TRACER_COLOR = 0xfff1a8;
+
+function hexColor(css: string, fallback: number): number {
+  return /^#[0-9a-f]{6}$/i.test(css) ? parseInt(css.slice(1), 16) : fallback;
+}
 
 type TargetKind = 'barricade' | 'enemy' | 'objective' | 'boss' | 'gate';
 interface Target {
@@ -54,10 +65,14 @@ export class GameManager {
 
   private save = new SaveService();
   private audio = new AudioService();
-  private ads: IAdService = new AdServiceStub();
+  private haptics: IHapticsService = new WebHapticsService();
+  private ads!: AdGate;
+  private iap!: IIapService;
+  private levels!: ILevelRepository;
   private input: InputSystem;
   private hud = new HUD();
   private shop!: ShopPanel;
+  private settings!: SettingsPanel;
 
   private track!: Track;
   private crowd!: CrowdController;
@@ -86,8 +101,18 @@ export class GameManager {
   private enemyBulletAccum = 0;
   private peakCount = 0;
   private bossBarShown = false;
-  private levelsClearedThisSession = 0;
   private transitioning = false;
+  private paused = false;
+  private adOpen = false; // between AdGate's onAdOpen and onAdClose: the ad owns the screen
+  private shopOpen = false;
+  // Bumped on every overlay show/hide, so an ad that resolves late can tell
+  // whether the screen whose button started it is still the one up.
+  private overlayGen = 0;
+  private music: MusicIntensity = 0;
+  private skin: SkinDef | null = null;
+  // the per-bullet spark reads this, so it is a resolved number, not a lookup
+  private tracerColor = DEFAULT_TRACER_COLOR;
+  private unitColor = DEFAULT_UNIT_COLOR;
   private runGen = 0;
   private enemyTracerIdx = 0;
   private tickRamp = 0;
@@ -124,10 +149,28 @@ export class GameManager {
     this.scene.add(this.sun);
     this.scene.add(this.sun.target);
 
+    // The save loads synchronously, so saved Sound/Music/Haptics apply before any
+    // gesture can unlock audio: a tap while boot() is still fetching (or after it
+    // failed) must not start music the player turned off.
+    this.applySettings();
     this.input = new InputSystem(this.app);
     this.input.onFirstInput(() => {
       this.audio.unlock();
     });
+    // nothing to open until boot() has built the panels (and never on a failed boot)
+    this.hud.setGearVisible(false);
+
+    // Backgrounded (tab switch, phone lock, app switcher): a live run pauses so
+    // the player comes back to the pause sheet, and audio goes silent whatever
+    // the state. pagehide/pageshow cover a bfcache round-trip. Registered here,
+    // not in boot(), so a slow or failed boot still goes silent; no run can be
+    // live before boot() has built the panels, so pause() is never reached early.
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) this.onHidden();
+      else this.onVisible();
+    });
+    window.addEventListener('pagehide', () => this.onHidden());
+    window.addEventListener('pageshow', () => { if (!document.hidden) this.onVisible(); });
 
     window.addEventListener('resize', () => this.resize());
     this.resize();
@@ -135,22 +178,52 @@ export class GameManager {
 
   async boot(): Promise<void> {
     const base = import.meta.env.BASE_URL;
-    this.cfg = await fetch(`${base}config.json`).then((r) => r.json() as Promise<GameConfig>);
-    this.shop = new ShopPanel(this.save, this.cfg, this.audio, () => this.showMenu());
+    this.cfg = await loadConfig(base);
+    const levels = new FetchLevelRepository(base, this.cfg);
+    await levels.init();
+    this.levels = levels; // assigned once count is readable
 
-    this.crowd = new CrowdController(this.cfg, this.scene);
-    this.bullets = new BulletPool(this.cfg.combat.maxVisibleBullets, 0xfff1a8, this.scene);
+    const sdk = new AdServiceStub(this.cfg.ads.stubLatencyMs);
+    this.ads = new AdGate(sdk, this.cfg.ads, {
+      onAdOpen: () => {
+        this.adOpen = true; // tick() holds the world still until close
+        this.audio.suspend();
+        this.refreshGear();
+      },
+      onAdClose: () => {
+        this.adOpen = false;
+        // closed while backgrounded: stay silent, visibilitychange resumes
+        if (!document.hidden) this.audio.resume();
+        this.refreshGear();
+      },
+      adsRemoved: () => this.save.get().removeAds,
+      now: () => performance.now() / 1000,
+    });
+    sdk.init().catch((err: unknown) => console.warn('Ad SDK init failed:', err));
+    this.iap = new IapServiceStub(this.cfg.ads.stubLatencyMs);
+
+    this.shop = new ShopPanel(this.save, this.cfg, this.audio, this.iap, () => {
+      this.shopOpen = false;
+      this.showMenu();
+    });
+    this.shop.onSkinChanged = () => this.applySkin();
+    this.shop.onCoinsChanged = () => this.hud.setCoins(this.save.get().coins);
+    this.settings = new SettingsPanel(this.save, this.audio, this.haptics);
+    this.hud.onGear = () => this.onGear();
+
+    this.crowd = new CrowdController(this.cfg, this.scene, DEFAULT_UNIT_COLOR);
+    this.bullets = new BulletPool(this.cfg.combat.maxVisibleBullets, DEFAULT_TRACER_COLOR, this.scene);
     this.enemyBullets = new BulletPool(28, 0xff7a3d, this.scene);
     this.particles = new ParticlePool(240, this.scene);
     this.crowd.particles = this.particles;
     // tracers die into a spark puff instead of blinking out
     this.bullets.onExpire = (x, y, z) => {
-      this.particles.burst(x, y, z, 3, 0xfff1a8, 2.5);
+      this.particles.burst(x, y, z, 3, this.tracerColor, 2.5);
       this.audio.play('spark'); // self-throttled: this fires ~100×/s at high crowd counts
     };
     this.enemyBullets.onExpire = (x, y, z) => this.particles.burst(x, y, z, 2, 0xff7a3d, 2.0);
 
-    this.audio.enabled = this.save.get().settings.sound;
+    this.applySkin();
     this.hud.onCountTick = (_v, rising) => {
       // consecutive rising ticks climb in pitch, so a big gate reads as a run-up
       this.tickRamp = rising ? Math.min(1, this.tickRamp + 0.06) : 0;
@@ -173,17 +246,6 @@ export class GameManager {
   }
 
   // ---------------------------------------------------------------- level load
-  private levelPath(n: number): string {
-    const wrapped = (((n - 1) % AVAILABLE_LEVELS) + AVAILABLE_LEVELS) % AVAILABLE_LEVELS + 1;
-    return `${import.meta.env.BASE_URL}levels/level_${String(wrapped).padStart(3, '0')}.json`;
-  }
-
-  /** How many times the authored level list has been looped (endless mode). */
-  private wrapsFor(n: number): number {
-    // clamped: a corrupt save with currentLevel < 1 must never scale threats down
-    return Math.max(0, Math.floor((n - 1) / AVAILABLE_LEVELS));
-  }
-
   /**
    * Physical footprint of the formation, not the (much wider) firing lane.
    * Shared by the barricade ram test and the boss sweep so both agree on how
@@ -194,8 +256,9 @@ export class GameManager {
   }
 
   private async loadLevel(n: number): Promise<void> {
-    this.level = await fetch(this.levelPath(n)).then((r) => r.json() as Promise<LevelDefinition>);
-    this.runSpeed = this.level.forwardSpeed + this.cfg.meta.wrapSpeedStep * this.wrapsFor(n);
+    // validated + cached by the repository: shared, so never mutated here
+    this.level = await this.levels.load(n);
+    this.runSpeed = this.level.forwardSpeed + this.cfg.meta.wrapSpeedStep * wrapsFor(n, this.levels.count);
     if (this.track) { this.scene.remove(this.track.group); this.track.dispose(); }
     this.track = new Track(this.cfg, this.level.length);
     this.scene.add(this.track.group);
@@ -203,23 +266,51 @@ export class GameManager {
     this.hud.setLevel(this.save.get().currentLevel);
   }
 
-  private async advanceLevel(): Promise<void> {
-    if (this.transitioning) return; // repeat NEXT LEVEL taps would skip levels
+  /** NEXT LEVEL, or RETRY after the next level failed to load (`retry`: this clear was already counted). */
+  private async advanceLevel(retry = false): Promise<void> {
+    // repeat NEXT LEVEL taps would skip levels; a ×2 ad still open must finish first
+    if (this.uiLocked()) return;
     this.transitioning = true;
-    this.hud.hideOverlay();
+    this.hideOverlay();
+    this.refreshGear();
+    const s = this.save.get();
+    const from = s.currentLevel;
     try {
-      const s = this.save.get();
-      s.currentLevel += 1;
-      this.save.save();
-      this.levelsClearedThisSession += 1;
-      if (this.levelsClearedThisSession % INTERSTITIAL_EVERY === 0) {
-        await this.ads.showInterstitial();
-      }
+      s.currentLevel = from + 1;
+      this.save.save(); // before the interstitial: a kill during the ad keeps the clear
+      if (!retry) await this.ads.onLevelComplete(); // AdGate owns the cadence, caps and Remove Ads
       await this.loadLevel(s.currentLevel);
-      this.startRun();
+    } catch (err) {
+      // Offline, or a level file that fails validation. Never keep it as saved
+      // progress: every later boot would fail on it too. A failed fetch or check
+      // rejects before loadLevel touches the scene, so MENU replays the old level.
+      console.error(`Level ${from + 1} failed to load:`, err);
+      s.currentLevel = from;
+      this.save.save();
+      this.showLoadError();
+      return;
     } finally {
       this.transitioning = false;
+      this.refreshGear();
     }
+    this.startRun();
+  }
+
+  private showLoadError(): void {
+    this.showOverlay({
+      title: 'LOAD FAILED',
+      body: "The next level couldn't be loaded. Check your connection and try again.",
+      btnText: 'RETRY',
+      onBtn: () => {
+        if (this.uiLocked()) return;
+        this.audio.play('click'); void this.advanceLevel(true);
+      },
+      btn2Text: 'MENU',
+      onBtn2: () => {
+        if (this.uiLocked()) return;
+        this.audio.play('click'); this.quitToMenu(); // back to the start line of the level just cleared
+      },
+    });
   }
 
   // ---------------------------------------------------------------- level build
@@ -249,7 +340,7 @@ export class GameManager {
   }
 
   private spawnSegment(raw: Segment): void {
-    const wraps = this.wrapsFor(this.save.get().currentLevel);
+    const wraps = wrapsFor(this.save.get().currentLevel, this.levels.count);
     const seg = wraps > 0 ? this.scaleSegment(raw, wraps) : raw;
     switch (seg.type) {
       case 'gate_pair': {
@@ -286,7 +377,7 @@ export class GameManager {
       }
       case 'coin_pickup':
       case 'crowd_pickup': {
-        const p = new Pickup(seg, this.cfg);
+        const p = new Pickup(seg, this.cfg, this.unitColor); // a squad that joins you wears your skin
         this.scene.add(p.group);
         this.pickups.push(p);
         this.pickupPassed.push(false);
@@ -314,28 +405,42 @@ export class GameManager {
   // ---------------------------------------------------------------- run control
   private showMenu(): void {
     this.state = 'MENU';
+    this.setMusic(0);
     this.hud.setHint(false);
     this.hud.bossBar(false);
     this.hud.setCoins(this.save.get().coins);
-    this.hud.showOverlay({
+    // GDD §10: a rewarded "bonus crowd at level start", only offered when an ad can fill
+    const bonus = this.cfg.ads.bonusCrowd;
+    const offerBonus = bonus > 0 && this.ads.canOfferRewarded();
+    this.showOverlay({
       title: 'Crowd Shooter Runner',
       body: 'Drag to steer your crowd. Pick good gates, smash through enemies, and overwhelm the boss.',
       btnText: 'TAP TO START',
-      onBtn: () => { this.audio.unlock(); this.audio.play('click'); this.startRun(); },
+      onBtn: () => {
+        if (this.uiLocked()) return;
+        this.audio.unlock(); this.audio.play('click'); this.startRun();
+      },
       btn2Text: '🛒 SHOP',
-      onBtn2: () => { this.audio.unlock(); this.audio.play('click'); this.hud.hideOverlay(); this.shop.open(); },
+      onBtn2: () => {
+        if (this.uiLocked()) return;
+        this.audio.unlock(); this.audio.play('click'); this.hideOverlay(); this.openShop(() => this.showMenu());
+      },
+      btn3Text: offerBonus ? `+${bonus} START CROWD (AD)` : undefined,
+      onBtn3: offerBonus ? () => { void this.bonusStart(); } : undefined,
     });
+    this.refreshGear();
   }
 
-  private startRun(): void {
+  private startRun(bonus = 0): void {
     this.runGen += 1; // invalidates ad continuations from the previous run
+    this.paused = false;
     this.audio.play('click');
-    this.hud.hideOverlay();
+    this.hideOverlay();
     // rebuild for a clean slate
     this.buildLevel();
     const s = this.save.get();
     const step = this.cfg.meta.upgradeSteps;
-    const start = this.cfg.crowd.startingCount + s.upgrades.startingCrowd * step.startingCrowd;
+    const start = this.cfg.crowd.startingCount + s.upgrades.startingCrowd * step.startingCrowd + bonus;
     this.crowd.reset(start);
     this.crowd.damageMul = 1 + s.upgrades.bulletPower * step.bulletPower;
     this.crowd.fireRateMul = 1 + s.upgrades.fireRate * step.fireRate;
@@ -351,20 +456,215 @@ export class GameManager {
     this.lanePreviewCount = -1;
     this.pickupsCollected = 0;
     this.state = 'PLAYING';
+    this.setMusic(1);
     this.hud.setHint(true);
     this.hud.setCount(this.crowd.count, true); // a fresh run must not roll up from the last one
     this.hud.setDanger(false);
     this.hud.setProgress(0);
+    if (bonus > 0) {
+      // the ad's units, called out on the crowd itself (the menu camera sits at the start line)
+      this.popupWorld(`+${bonus}`, '#5ce06a', this.crowd.centroid.x, 1.6, this.crowd.centroid.z);
+      this.audio.play('add');
+    }
+    this.refreshGear();
+  }
+
+  /** Menu btn3: watch an ad, start the run with cfg.ads.bonusCrowd extra units. */
+  private async bonusStart(): Promise<void> {
+    if (this.uiLocked()) return;
+    this.audio.unlock();
+    this.audio.play('click');
+    if (await this.rewarded('bonus_crowd', 3)) this.startRun(this.cfg.ads.bonusCrowd);
+  }
+
+  /**
+   * One rewarded ad started from overlay button `btn`, which shows LOADING...
+   * while it runs. Resolves null when the run, the state or the screen moved on
+   * meanwhile: the caller then grants nothing and leaves the new overlay alone.
+   */
+  private async rewarded(kind: RewardKind, btn: 1 | 2 | 3): Promise<boolean | null> {
+    if (this.ads.busy) return null;
+    const gen = this.runGen;
+    const screen = this.overlayGen;
+    const state = this.state;
+    this.hud.setButtonBusy(btn, true);
+    this.hud.setButtonsLocked(true); // uiLocked() ignores the siblings meanwhile, so they must look it
+    const ok = await this.ads.showRewarded(kind);
+    // a new overlay rebuilt the buttons itself (showOverlay clears busy and locks)
+    if (gen !== this.runGen || screen !== this.overlayGen || state !== this.state) return null;
+    this.hud.setButtonBusy(btn, false);
+    this.hud.setButtonsLocked(false);
+    return ok;
+  }
+
+  /** Overlay buttons ignore taps while a level change or an ad is in flight. */
+  private uiLocked(): boolean {
+    return this.transitioning || this.ads.busy;
+  }
+
+  private showOverlay(o: OverlayOpts): void {
+    this.overlayGen += 1;
+    this.hud.showOverlay(o);
+  }
+
+  private hideOverlay(): void {
+    this.overlayGen += 1;
+    this.hud.hideOverlay();
+  }
+
+  private openShop(returnTo: () => void): void {
+    this.shopOpen = true;
+    this.refreshGear();
+    this.shop.open(() => {
+      this.shopOpen = false;
+      returnTo();
+      this.refreshGear();
+    });
+  }
+
+  // ---------------------------------------------------------------- pause / settings
+  /**
+   * Gear on the menu, pause button mid-run. Hidden on the result screens, under
+   * the shop / settings / an ad, and while a level change is in flight.
+   */
+  private refreshGear(): void {
+    const running = this.state === 'PLAYING' || this.state === 'BOSS';
+    const show = (running || this.state === 'MENU')
+      && !this.transitioning && !this.adOpen && !this.shopOpen && !this.settings.isOpen;
+    this.hud.setGearMode(running ? 'pause' : 'settings');
+    this.hud.setGearVisible(show);
+  }
+
+  private onGear(): void {
+    if (this.uiLocked() || this.shopOpen || this.settings.isOpen) return;
+    this.audio.unlock(); // the gear may be the player's first tap
+    this.audio.play('click');
+    if (this.state === 'MENU') {
+      this.hideOverlay();
+      this.settings.open({
+        paused: false,
+        onClose: () => this.showMenu(),
+        onReset: () => { void this.resetProgress(); },
+      });
+      this.refreshGear();
+    } else if (this.state === 'PLAYING' || this.state === 'BOSS') {
+      this.pause();
+    }
+  }
+
+  /** Freeze a live run under the pause sheet (gear tap, or the app was backgrounded). */
+  private pause(): void {
+    if (this.paused || (this.state !== 'PLAYING' && this.state !== 'BOSS')) return;
+    this.paused = true;
+    this.settings.open({
+      paused: true,
+      onClose: () => this.resumePlay(),
+      onQuit: () => this.quitToMenu(),
+    });
+    this.refreshGear();
+  }
+
+  private resumePlay(): void {
+    this.paused = false;
+    // the steer target is left where it was: resuming must not yank the crowd sideways
+    this.refreshGear();
+  }
+
+  private quitToMenu(): void {
+    this.paused = false;
+    this.runGen += 1;
+    this.recordPeak(); // a quit still counts toward the best crowd
+    this.bullets.clear();
+    this.enemyBullets.clear();
+    this.hud.setDanger(false);
+    this.hud.bossBar(false);
+    this.bossBarShown = false;
+    this.timeScale = 1;
+    this.targetTimeScale = 1;
+    // back to the start line, as at boot: the camera eases home behind the menu
+    // and a bonus-crowd popup lands on the crowd's real spawn point
+    this.buildLevel();
+    this.crowd.reset(0);
+    this.crowd.update(0, this.time);
+    this.hud.setProgress(0);
+    this.showMenu();
+  }
+
+  /** Settings → RESET PROGRESS (already confirmed by the panel's second tap). */
+  private async resetProgress(): Promise<void> {
+    if (this.transitioning) return;
+    this.transitioning = true;
+    this.refreshGear();
+    try {
+      // Progress only: the player's preferences and a paid Remove Ads are not
+      // progress (and the test store's RESTORE PURCHASES never returns anything).
+      const s = this.save.get();
+      const settings = { ...s.settings };
+      const removeAds = s.removeAds;
+      this.save.reset();
+      this.save.get().settings = settings;
+      this.save.setRemoveAds(removeAds); // saves the settings with it
+      this.applySkin();
+      this.hud.setCoins(this.save.get().coins);
+      await this.loadLevel(1);
+    } catch (err) {
+      console.error('Reset: failed to reload level 1:', err);
+    } finally {
+      this.transitioning = false;
+    }
+    this.showMenu();
+  }
+
+  private onHidden(): void {
+    if ((this.state === 'PLAYING' || this.state === 'BOSS') && !this.paused && !this.adOpen) this.pause();
+    this.audio.suspend();
+  }
+
+  private onVisible(): void {
+    // A revive, bonus start or level change can take a run live while hidden (its
+    // ad or fetch settled in the background): come back to the pause sheet anyway.
+    if ((this.state === 'PLAYING' || this.state === 'BOSS') && !this.paused && !this.adOpen) this.pause();
+    if (!this.adOpen) this.audio.resume(); // an open ad resumes audio itself, on close
+  }
+
+  /** Saved settings → live services (at construction, before any gesture can unlock audio). */
+  private applySettings(): void {
+    const s = this.save.get().settings;
+    this.audio.setSfxEnabled(s.sound);
+    this.audio.setMusicEnabled(s.music);
+    this.haptics.enabled = s.haptics;
+  }
+
+  /** Equipped skin → unit body and tracer tint. An id the catalog lost falls back to skins[0]. */
+  private applySkin(): void {
+    const skins = this.cfg.skins;
+    const id = this.save.get().equippedSkin;
+    const skin = skins.find((s) => s.id === id) ?? skins[0];
+    this.skin = skin;
+    this.unitColor = hexColor(skin.color, DEFAULT_UNIT_COLOR);
+    this.crowd.setColor(this.unitColor);
+    this.tracerColor = hexColor(skin.tracer, DEFAULT_TRACER_COLOR);
+    this.bullets.setColor(this.tracerColor);
+  }
+
+  private setMusic(level: MusicIntensity): void {
+    this.music = level;
+    this.audio.setMusicIntensity(level);
   }
 
   // ---------------------------------------------------------------- main tick
   private tick(dtReal: number): void {
-    this.time += dtReal;
+    // Paused or under an ad, the world holds still: no sim, no particles, no
+    // entity bob, no camera drift, no slow-mo recovery. Only the HUD keeps real
+    // time, so a count or coin roll-up already under way still lands.
+    const frozen = this.paused || this.adOpen;
+    const dtWorld = frozen ? 0 : dtReal;
+    this.time += dtWorld;
     // ease slow-mo
-    this.timeScale += (this.targetTimeScale - this.timeScale) * Math.min(1, dtReal * 6);
-    const dt = dtReal * this.timeScale;
+    this.timeScale += (this.targetTimeScale - this.timeScale) * Math.min(1, dtWorld * 6);
+    const dt = dtWorld * this.timeScale;
 
-    if (this.state === 'PLAYING' || this.state === 'BOSS') {
+    if ((this.state === 'PLAYING' || this.state === 'BOSS') && !frozen) {
       this.simulate(dt);
     }
     // Unconditional: death pops and the count roll-up must finish playing while
@@ -372,7 +672,7 @@ export class GameManager {
     this.particles.update(dt);
     this.hud.update(dtReal);
     this.updateEntitiesVisual(dt);
-    this.updateCamera(dtReal);
+    this.updateCamera(dtWorld);
     this.renderer.render(this.scene, this.camera);
   }
 
@@ -393,6 +693,7 @@ export class GameManager {
         this.state = 'BOSS';
         this.bossBarShown = true;
         this.hud.bossBar(true, 1);
+        this.setMusic(2);
       }
     }
 
@@ -644,16 +945,20 @@ export class GameManager {
     this.hud.setCount(this.crowd.count);
 
     if (res.op === 'mul' && res.after > res.before) {
-      this.audio.play('multiply', res.after / Math.max(1, res.before));
+      const ratio = res.after / Math.max(1, res.before);
+      this.audio.play('multiply', ratio);
+      this.haptics.pulse(ratio >= 3 ? 'heavy' : 'medium');
       this.hud.flash('#9fe6ff', 0.45);
-      this.fovPunch = Math.min(10, 4 + res.after / Math.max(1, res.before));
+      this.fovPunch = Math.min(10, 4 + ratio);
       this.shake = Math.max(this.shake, 0.25);
     } else if (res.op === 'add') {
       this.audio.play('add');
+      this.haptics.pulse('light');
     } else if (res.after === res.before) {
       this.audio.play('click'); // no-op gate (e.g. a fully decayed tickable): not a punish
     } else {
       this.audio.play('bad');
+      this.haptics.pulse('warn');
       this.hud.flash('#ff5a52', 0.3);
       this.shake = Math.max(this.shake, 0.2);
     }
@@ -676,6 +981,7 @@ export class GameManager {
           if (lost > 0) {
             this.popupWorld(`-${lost}`, '#ff5a52', b.x, 1.2, b.z);
             this.audio.play('break');
+            this.haptics.pulse('medium');
             this.hud.flash('#ff5a52', 0.35);
             this.shake = Math.max(this.shake, 0.3);
           }
@@ -705,6 +1011,7 @@ export class GameManager {
         this.crowd.add(p.value);
         this.popupWorld(`+${p.value}`, '#5ce06a', p.x, 1.4, p.z);
         this.audio.play('add'); // the birth ripple fires itself off the count rise
+        this.haptics.pulse('light'); // coins stay buzz-free: they are frequent, not a power change
       }
     }
 
@@ -756,6 +1063,7 @@ export class GameManager {
         if (lost > 0) {
           this.popupWorld(`-${lost}`, '#ff5a52', this.crowd.centroid.x, 1.4, this.crowd.centroid.z);
           this.audio.play('bad');
+          this.haptics.pulse('warn');
           this.hud.flash('#ff3b30', 0.4);
           this.shake = Math.max(this.shake, 0.4);
           this.hud.setCount(this.crowd.count);
@@ -803,9 +1111,11 @@ export class GameManager {
   // ---------------------------------------------------------------- end states
   private onBossDefeated(): void {
     this.state = 'PLAYING';
+    this.setMusic(1);
     this.hud.bossBar(false);
     this.bossBarShown = false;
     this.audio.play('win');
+    this.haptics.pulse('heavy');
     this.hud.flash('#ffffff', 0.7);
     this.targetTimeScale = 0.35; // brief slow-mo
     this.timeScale = 0.35;
@@ -822,12 +1132,15 @@ export class GameManager {
     this.save.addCoins(coins);
     this.hud.setCoins(this.save.get().coins);
     this.audio.play('cheer');
+    this.haptics.pulse('success');
+    this.setMusic(0);
     this.hud.setDanger(false);
     const isNewBest = this.recordPeak();
     this.rewardDoubled = false;
 
     this.state = 'REWARD';
     this.showReward(surviving, mult, coins, isNewBest);
+    this.refreshGear();
   }
 
   /** Persists the run's peak crowd if it beat the record; true when it did. */
@@ -840,18 +1153,23 @@ export class GameManager {
   }
 
   private showReward(surviving: number, mult: number, coins: number, isNewBest: boolean): void {
+    this.overlayGen += 1; // showRewardCeremony is an overlay show too
     this.hud.showRewardCeremony({
       survivors: surviving,
       mult,
       coins,
       best: this.save.get().bestPeak,
       isNewBest,
-      onNext: () => { this.audio.play('click'); void this.advanceLevel(); },
+      onNext: () => {
+        if (this.uiLocked()) return;
+        this.audio.play('click'); void this.advanceLevel();
+      },
       onDouble: () => { void this.doubleCoins(coins); },
       onShop: () => {
+        if (this.uiLocked()) return;
         this.audio.play('click');
-        this.hud.hideOverlay();
-        this.shop.open(() => {
+        this.hideOverlay();
+        this.openShop(() => {
           this.hud.setCoins(this.save.get().coins);
           this.showReward(surviving, mult, coins, isNewBest); // replays the ceremony from the top
         });
@@ -859,14 +1177,26 @@ export class GameManager {
     });
     // a re-show (returning from the shop) must not re-arm an already-claimed ×2
     if (this.rewardDoubled) this.hud.setRewardCoins(coins * 2, true);
+    else if (!this.ads.canOfferRewarded()) this.withdrawDoubleOffer();
+  }
+
+  /**
+   * No fill: the ceremony would still reveal a ×2 button that can only fail.
+   * HUD has no option to omit it, so hide it the way setRewardCoins(…, true)
+   * does; the next showOverlay() rebuilds btn2 from scratch.
+   */
+  private withdrawDoubleOffer(): void {
+    const btn = document.getElementById('overlay-btn2');
+    if (!btn) return;
+    btn.classList.add('hidden');
+    btn.onclick = null;
   }
 
   private async doubleCoins(coins: number): Promise<void> {
+    if (this.rewardDoubled || this.uiLocked()) return;
     this.audio.play('click');
-    const gen = this.runGen;
-    const ok = await this.ads.showRewarded('double_coins');
-    if (gen !== this.runGen || this.state !== 'REWARD') return; // run moved on during the ad
-    if (!ok) return;
+    const ok = await this.rewarded('double_coins', 2); // null: the run moved on during the ad
+    if (!ok || this.rewardDoubled) return;
     this.rewardDoubled = true;
     this.save.addCoins(coins);
     this.hud.setCoins(this.save.get().coins);
@@ -875,35 +1205,38 @@ export class GameManager {
   }
 
   private onLose(): void {
-    if (this.state === 'LOSE') return;
+    // only a live run can be lost: the finish may already have paid out this frame
+    if (this.state !== 'PLAYING' && this.state !== 'BOSS') return;
     this.resumeState = this.boss && this.bossBarShown ? 'BOSS' : 'PLAYING';
     this.state = 'LOSE';
     this.audio.play('lose');
+    this.haptics.pulse('fail');
+    this.setMusic(0);
     this.hud.bossBar(false);
     this.hud.setDanger(false); // simulate() stops here, so clear the vignette by hand
     this.recordPeak();
     this.showLoseOverlay();
+    this.refreshGear();
   }
 
   private showLoseOverlay(): void {
-    this.hud.showOverlay({
+    const canRevive = this.ads.canOfferRewarded(); // no fill: no REVIVE button to fail on
+    this.showOverlay({
       title: 'OUT OF CROWD',
       body: 'Your swarm was wiped out.',
       btnText: 'RETRY',
-      onBtn: () => { this.audio.play('click'); this.startRun(); },
-      btn2Text: 'REVIVE (AD)',
-      onBtn2: async () => {
-        this.audio.play('click');
-        const gen = this.runGen;
-        const ok = await this.ads.showRewarded('revive');
-        if (gen !== this.runGen || this.state !== 'LOSE') return; // run moved on during the ad
-        if (ok) this.revive();
+      onBtn: () => {
+        if (this.uiLocked()) return;
+        this.audio.play('click'); this.startRun();
       },
+      btn2Text: canRevive ? 'REVIVE (AD)' : undefined,
+      onBtn2: canRevive ? () => { void this.reviveFromAd(); } : undefined,
       btn3Text: '🛒 SHOP',
       onBtn3: () => {
+        if (this.uiLocked()) return;
         this.audio.play('click');
-        this.hud.hideOverlay();
-        this.shop.open(() => {
+        this.hideOverlay();
+        this.openShop(() => {
           this.hud.setCoins(this.save.get().coins);
           this.showLoseOverlay();
         });
@@ -911,13 +1244,21 @@ export class GameManager {
     });
   }
 
+  private async reviveFromAd(): Promise<void> {
+    if (this.uiLocked()) return;
+    this.audio.play('click');
+    if (await this.rewarded('revive', 2)) this.revive(); // null: the run moved on during the ad
+  }
+
   private revive(): void {
     const amount = Math.max(10, Math.floor(this.peakCount * this.cfg.meta.reviveFraction));
     this.crowd.count = amount;
     this.hud.setCount(amount, true); // a revive is a hard reset, not a roll-up
-    this.hud.hideOverlay();
+    this.hideOverlay();
     if (this.resumeState === 'BOSS' && this.boss) this.hud.bossBar(true, this.boss.hpFraction());
     this.state = this.resumeState;
+    this.setMusic(this.state === 'BOSS' ? 2 : 1);
+    this.refreshGear();
   }
 
   // ---------------------------------------------------------------- debug
@@ -934,6 +1275,14 @@ export class GameManager {
       coins: this.save.get().coins,
       peak: this.peakCount,
       bestPeak: this.save.get().bestPeak,
+      paused: this.paused,
+      adOpen: this.adOpen,
+      adBusy: this.ads ? this.ads.busy : false,
+      skin: this.skin ? this.skin.id : null,
+      music: this.music,
+      settings: { ...this.save.get().settings },
+      removeAds: this.save.get().removeAds,
+      levelCount: this.levels ? this.levels.count : null,
     };
   }
 

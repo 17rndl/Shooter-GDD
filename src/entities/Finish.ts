@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { NumberPlate } from '../util/Label';
-import { lerp } from '../util/MathUtil';
+import { screenToWorldX } from '../core/WorldSpace';
 import type { GameConfig, Segment } from '../data/types';
 
 // Finish line preceded by a bank of coin-multiplier lanes (×2 / ×3 / ×5).
@@ -28,8 +28,8 @@ export class Finish {
 
     for (let i = 0; i < n; i++) {
       const t0 = i / n, t1 = (i + 1) / n;
-      // reversed so authored lane order reads left→right on the (mirrored) screen
-      const centerX = lerp(maxX, minX, (t0 + t1) / 2);
+      // authored lane order reads left→right on screen
+      const centerX = screenToWorldX((t0 + t1) / 2, minX, maxX);
       const width = (maxX - minX) / n;
       const mult = this.lanes[i];
       const hue = 0.13 - i * 0.02;

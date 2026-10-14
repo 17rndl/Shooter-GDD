@@ -56,6 +56,29 @@ export interface GameConfig {
     upgradeSteps: { bulletPower: number; fireRate: number; startingCrowd: number };
   };
   economy: { coinPerUnit: number; upgradeCostBase: number; upgradeCostGrowth: number };
+  /** Cosmetic unit skins. The first entry is id 'default' at price 0. */
+  skins: SkinDef[];
+  ads: {
+    interstitialEveryLevels: number;
+    interstitialMinIntervalSec: number;
+    /** How long any ad may take to reach the screen; once shown, only AdGate's long backstop applies. */
+    rewardedTimeoutSec: number;
+    /** How long the stub SDK pretends an ad takes to show. */
+    stubLatencyMs: number;
+    /** Units the bonus_crowd rewarded ad adds at run start. */
+    bonusCrowd: number;
+  };
+}
+
+export interface SkinDef {
+  id: string;
+  name: string;
+  /** '#rrggbb' unit body. */
+  color: string;
+  /** '#rrggbb' bullet tint. */
+  tracer: string;
+  /** Coins; 0 = free. */
+  price: number;
 }
 
 export type GateOp = 'add' | 'mul' | 'sub' | 'div';
@@ -117,8 +140,12 @@ export interface SaveData {
   /** Largest crowd ever reached across all runs — drives the NEW BEST badge. */
   bestPeak: number;
   upgrades: UpgradeLevels;
-  settings: { sound: boolean; haptics: boolean };
+  settings: { sound: boolean; music: boolean; haptics: boolean };
   ownedSkins: string[];
+  /** A skin id from ownedSkins. Resolved against cfg.skins by the game, not here. */
+  equippedSkin: string;
+  /** Remove Ads purchase: suppresses interstitials (rewarded ads stay opt-in). */
+  removeAds: boolean;
 }
 
 export type GameState =

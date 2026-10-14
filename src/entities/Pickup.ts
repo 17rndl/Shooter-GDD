@@ -33,7 +33,7 @@ export class Pickup {
   private collecting = -1;
   private readonly spacing: number;
 
-  constructor(seg: Segment, cfg: GameConfig) {
+  constructor(seg: Segment, cfg: GameConfig, unitColor = CROWD_BLUE) {
     this.kind = seg.type === 'crowd_pickup' ? 'crowd' : 'coin';
     this.x = seg.x ?? 0;
     this.z = seg.z;
@@ -47,7 +47,7 @@ export class Pickup {
     for (let i = 0; i < this.phase.length; i++) this.phase[i] = Math.random() * Math.PI * 2;
 
     if (this.kind === 'crowd') {
-      this.instancer = new UnitInstancer(CROWD_COUNT, CROWD_BLUE, cfg.crowd.unitRadius);
+      this.instancer = new UnitInstancer(CROWD_COUNT, unitColor, cfg.crowd.unitRadius);
       const mat = this.instancer.mesh.material as THREE.MeshStandardMaterial;
       mat.transparent = true; // armed at build time: flipping it mid-fade recompiles the shader
       this.instancer.setVisibleCount(CROWD_COUNT);

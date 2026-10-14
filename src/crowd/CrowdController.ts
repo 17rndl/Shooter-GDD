@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { UnitInstancer } from './UnitInstancer';
-import { clamp, damp, phyllotaxis, lerp, type Vec2 } from '../util/MathUtil';
+import { clamp, damp, phyllotaxis, type Vec2 } from '../util/MathUtil';
+import { screenToWorldX } from '../core/WorldSpace';
 import type { GameConfig } from '../data/types';
 import type { ParticlePool } from '../combat/ParticlePool';
 
@@ -80,13 +81,13 @@ export class CrowdController {
   }
 
   /**
-   * Normalized [0,1] screen-X input → target world X.
-   * The chase camera looks down +Z, which mirrors world X on screen, so we
-   * invert here: dragging to the screen-right moves the crowd screen-right.
+   * Normalized [0,1] screen-X input → target world X. The camera mirrors world
+   * X on screen; screenToWorldX owns that flip, so dragging to the screen-right
+   * moves the crowd screen-right.
    */
   steerNormalized(t01: number): void {
     const { minX, maxX } = this.cfg.track;
-    this.targetX = lerp(minX, maxX, 1 - clamp(t01, 0, 1));
+    this.targetX = screenToWorldX(clamp(t01, 0, 1), minX, maxX);
   }
 
   setTargetX(x: number): void {

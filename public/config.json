@@ -46,5 +46,19 @@
     "wrapSpeedStep": 0.5,
     "upgradeSteps": { "bulletPower": 0.25, "fireRate": 0.2, "startingCrowd": 3 }
   },
-  "economy": { "coinPerUnit": 2, "upgradeCostBase": 50, "upgradeCostGrowth": 1.35 }
+  "economy": { "coinPerUnit": 2, "upgradeCostBase": 50, "upgradeCostGrowth": 1.35 },
+  "skins": [
+    { "id": "default", "name": "Classic", "color": "#4ea3ff", "tracer": "#fff1a8", "price": 0 },
+    { "id": "mint", "name": "Mint", "color": "#3fe0b0", "tracer": "#d4fff1", "price": 600 },
+    { "id": "violet", "name": "Violet", "color": "#a77bff", "tracer": "#eadcff", "price": 1200 },
+    { "id": "snow", "name": "Snow", "color": "#eef3ff", "tracer": "#bfe3ff", "price": 2400 },
+    { "id": "pink", "name": "Bubblegum", "color": "#ff7ad9", "tracer": "#ffe0f6", "price": 4000 }
+  ],
+  "ads": {
+    "interstitialEveryLevels": 2,
+    "interstitialMinIntervalSec": 45,
+    "rewardedTimeoutSec": 30,
+    "stubLatencyMs": 600,
+    "bonusCrowd": 15
+  }
 }

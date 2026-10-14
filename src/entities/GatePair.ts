@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { NumberPlate } from '../util/Label';
+import { screenToWorldX } from '../core/WorldSpace';
 import type { GameConfig, GateOp, GateSide, Segment } from '../data/types';
 
 const OP_COLOR: Record<GateOp, number> = {
@@ -49,13 +50,12 @@ export class GatePair {
     this.tickable = !!seg.tickable;
     this.tickPerHit = seg.tickPerHit ?? 1;
     const { minX, maxX } = cfg.track;
-    const mid = (minX + maxX) / 2;
     const halfW = (maxX - minX) / 4; // each door spans half the track
 
-    // Camera mirrors world X on screen, so author "left" at world +X (screen-left)
-    // and "right" at world -X (screen-right) to keep JSON intuitive.
-    if (seg.left) this.halves.push(this.makeHalf(seg.left, (mid + maxX) / 2, halfW));
-    if (seg.right) this.halves.push(this.makeHalf(seg.right, (minX + mid) / 2, halfW));
+    // JSON "left"/"right" are SCREEN sides: door centres sit at the quarter
+    // points of the screen, and screenToWorldX handles the camera's X mirror.
+    if (seg.left) this.halves.push(this.makeHalf(seg.left, screenToWorldX(0.25, minX, maxX), halfW));
+    if (seg.right) this.halves.push(this.makeHalf(seg.right, screenToWorldX(0.75, minX, maxX), halfW));
     this.accum = this.halves.map(() => 0);
   }
 

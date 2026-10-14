@@ -9,8 +9,10 @@ game.boot().catch((err) => {
   const t = document.getElementById('overlay-title');
   const b = document.getElementById('overlay-body');
   if (o && t && b) {
+    // ConfigLoader / LevelRepository errors name the file and the bad field
     t.textContent = 'Failed to load';
     b.textContent = String(err);
+    document.getElementById('overlay-btn')?.classList.add('hidden'); // nothing to start
     o.classList.add('show');
   }
 });

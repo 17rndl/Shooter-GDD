@@ -12,6 +12,9 @@
         --red: #ff5a52;
         --gold: #ffd24a;
         --ink: #0a0e1a;
+        --panel: rgba(6,10,22,0.94);
+        --card: rgba(255,255,255,0.08);
+        --line: rgba(255,255,255,0.12);
       }
       * { margin: 0; padding: 0; box-sizing: border-box; }
       html, body { width: 100%; height: 100%; overflow: hidden; background: var(--ink); }
@@ -34,10 +37,10 @@
       /* ---------- HUD ---------- */
       #hud { position: absolute; inset: 0; pointer-events: none; color: #fff; }
 
-      /* top: level + progress */
+      /* top: gear + level + progress + coins, one flex row so nothing can overlap */
       #topbar {
         position: absolute; top: 0; left: 0; right: 0;
-        padding: 14px 16px 10px;
+        padding: 8px 14px 8px 8px;
         display: flex; align-items: center; gap: 10px;
         background: linear-gradient(180deg, rgba(0,0,0,0.35), transparent);
       }
@@ -52,12 +55,34 @@
         border-radius: 999px; transition: width 0.12s linear;
       }
       #coins {
-        position: absolute; top: 12px; right: 14px;
+        flex: none;
         font-weight: 800; font-size: 16px; color: var(--gold);
+        font-variant-numeric: tabular-nums;
         text-shadow: 0 2px 6px rgba(0,0,0,0.5);
         display: flex; align-items: center; gap: 5px;
       }
       #coins::before { content: "●"; color: var(--gold); }
+
+      /* square icon button (gear / pause). 40px box, the ::before pad widens the
+         touch target to 48px without growing the layout. */
+      .icon-btn {
+        position: relative; flex: none; pointer-events: auto; cursor: pointer;
+        width: 40px; height: 40px; padding: 0;
+        display: inline-flex; align-items: center; justify-content: center;
+        color: #fff; background: rgba(10,14,26,0.5);
+        border: 1px solid rgba(255,255,255,0.25); border-radius: 12px;
+        box-shadow: 0 3px 10px rgba(0,0,0,0.35);
+        transition: transform 0.06s ease;
+      }
+      .icon-btn::before { content: ""; position: absolute; inset: -4px; }
+      .icon-btn:active { transform: scale(0.92); }
+      /* SVG children must not become the event target: InputSystem only skips
+         HTMLElement targets inside a button, so a tap on a <rect> would steer */
+      .icon-btn svg { width: 22px; height: 22px; display: block; pointer-events: none; }
+      /* above #overlay so it works on the menu, below the panels (z 20) */
+      #gear { z-index: 15; }
+      #gear[data-mode="pause"] .ico-gear,
+      #gear:not([data-mode="pause"]) .ico-pause { display: none; }
 
       /* bottom-center: live crowd count */
       #crowd-count {
@@ -122,6 +147,28 @@
       .btn.gold { background: linear-gradient(180deg, #ffe58a, var(--gold)); box-shadow: 0 6px 0 #b58a13, 0 10px 18px rgba(0,0,0,0.4); }
       .btn.gold:active { box-shadow: 0 2px 0 #b58a13, 0 6px 12px rgba(0,0,0,0.4); }
       .btn.ghost { background: rgba(255,255,255,0.14); color: #fff; box-shadow: none; border: 1px solid rgba(255,255,255,0.25); }
+      .btn.small { padding: 10px 18px; font-size: 14px; }
+      .btn:disabled { cursor: default; opacity: 0.55; }
+      .btn:disabled:active { transform: none; }
+      /* a positive, settled state (EQUIPPED / OWNED): disabled but not greyed */
+      .btn.equipped, .btn.equipped:disabled {
+        opacity: 1; color: var(--green); box-shadow: none;
+        background: rgba(92,224,106,0.14); border: 1px solid rgba(92,224,106,0.6);
+      }
+      /* two-step destructive action: outlined until armed, solid red while armed */
+      .btn.danger {
+        padding: 11px 20px; font-size: 14px; color: #ff8a84; box-shadow: none;
+        background: rgba(255,90,82,0.12); border: 1px solid rgba(255,90,82,0.55);
+      }
+      .btn.danger.armed {
+        color: #2a0505; border-color: transparent;
+        background: linear-gradient(180deg, #ff8a80, var(--red));
+        box-shadow: 0 5px 0 #a3302a, 0 8px 16px rgba(0,0,0,0.4);
+      }
+      .btn.danger.armed:active { box-shadow: 0 2px 0 #a3302a, 0 5px 10px rgba(0,0,0,0.4); }
+      .btn:focus-visible, .icon-btn:focus-visible, .shop-tab:focus-visible, .switch:focus-visible {
+        outline: 3px solid #fff; outline-offset: 3px;
+      }
       /* held back until the reward count-up lands, then revealed with a pulse */
       /* no transition on .reveal itself — arming must be instant, only the reveal fades */
       .btn.reveal { opacity: 0; pointer-events: none; }
@@ -135,6 +182,8 @@
         0%   { box-shadow: 0 0 0 0 rgba(255,210,74,0.55); }
         100% { box-shadow: 0 0 0 12px rgba(255,210,74,0); }
       }
+      /* HUD.setButtonBusy on a revealed ×2 offer: dim it and stop the come-on pulse */
+      .btn.reveal.shown:disabled { opacity: 0.55; animation: none; }
       .reward-coins { font-size: 30px; font-weight: 900; color: var(--gold); }
       .coin-tag { font-size: 15px; font-weight: 800; opacity: 0.85; margin-left: 6px; }
       .best-badge {
@@ -152,12 +201,139 @@
       }
       @keyframes pulse { 0%,100%{opacity:0.45} 50%{opacity:0.85} }
 
+      /* ---------- Panels (shop / settings) ---------- */
+      /* Full-cover sheets above the gear. Header and actions stay put; only
+         .panel-scroll scrolls, so BACK is always reachable on a short screen. */
+      .panel {
+        position: absolute; inset: 0; z-index: 20; display: none;
+        flex-direction: column; align-items: center; gap: 14px;
+        padding: 20px 16px 22px;
+        background: var(--panel); color: #fff; pointer-events: auto;
+      }
+      .panel.show { display: flex; }
+      .panel button { font-family: inherit; }
+      .panel-title { font-size: 28px; font-weight: 900; letter-spacing: 0.5px; margin-top: 4px; flex: none; }
+      .panel-coins { font-size: 22px; font-weight: 900; color: var(--gold); font-variant-numeric: tabular-nums; flex: none; }
+      /* body is touch-action:none for steering; a scroll container resets that for its subtree */
+      .panel-scroll {
+        width: 100%; max-width: 360px; flex: 1 1 auto; min-height: 0;
+        overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; touch-action: pan-y;
+        padding-bottom: 4px;
+      }
+      .panel-actions { display: flex; flex-direction: column; align-items: center; gap: 12px; flex: none; }
+      /* opens over the live menu overlay, whose big white title bleeds through any alpha */
+      .panel.panel-settings { justify-content: center; background: rgb(6,10,22); }
+      /* the pause sheet lets the frozen run show through instead */
+      .panel.panel-settings.paused { background: rgba(6,10,22,0.84); backdrop-filter: blur(3px); }
+      .panel-settings .panel-scroll { flex: 0 1 auto; }
+
+      /* shop tab bar: a segmented control, three equal columns at any width */
+      .shop-tabs {
+        display: flex; gap: 4px; width: 100%; max-width: 360px; flex: none; padding: 4px;
+        background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+      }
+      .shop-tab {
+        flex: 1 1 0; min-width: 0; min-height: 40px; padding: 8px 4px; cursor: pointer;
+        border: none; border-radius: 10px; background: transparent; color: rgba(255,255,255,0.72);
+        font-size: 13px; font-weight: 900; letter-spacing: 0.4px;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      }
+      .shop-tab[aria-selected="true"] {
+        color: #06122a; background: linear-gradient(180deg, #7dd3ff, var(--blue));
+        box-shadow: 0 3px 0 #2b6fb0;
+      }
+
+      .shop-list { display: flex; flex-direction: column; gap: 10px; }
+      .shop-row {
+        display: flex; align-items: center; gap: 12px; padding: 12px 14px;
+        background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+      }
+      .shop-info { flex: 1; min-width: 0; }
+      .shop-name { font-weight: 800; font-size: 16px; }
+      .shop-sub { opacity: 0.75; font-size: 13px; }
+      .shop-row .btn { flex: none; padding: 10px 14px; font-size: 14px; min-width: 92px; }
+
+      /* skins: 2-column card grid; the preview is pure CSS (capsule + tracer streak) */
+      .skin-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+      .skin-card {
+        display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 10px;
+        background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+      }
+      /* inset ring: an outer one would be clipped by the scroll container's edges */
+      .skin-card.equipped {
+        border-color: var(--green);
+        box-shadow: inset 0 0 0 2px var(--green), 0 0 18px rgba(92,224,106,0.18);
+      }
+      .skin-stage {
+        position: relative; width: 100%; height: 72px; border-radius: 10px; overflow: hidden;
+        background:
+          radial-gradient(16px 5px at 30% 61px, rgba(0,0,0,0.55), transparent),
+          radial-gradient(ellipse at 50% 100%, rgba(255,255,255,0.10), transparent 70%),
+          rgba(0,0,0,0.28);
+      }
+      .skin-capsule {
+        position: absolute; left: 30%; top: 14px; width: 22px; height: 46px; margin-left: -11px;
+        border-radius: 999px;
+        background:
+          radial-gradient(circle at 34% 24%, rgba(255,255,255,0.65), rgba(255,255,255,0) 40%),
+          linear-gradient(90deg, rgba(0,0,0,0) 55%, rgba(0,0,0,0.24)),
+          var(--skin);
+      }
+      .skin-tracer {
+        position: absolute; left: calc(30% + 16px); right: 16px; top: 29px; height: 4px;
+        border-radius: 999px;
+        background: linear-gradient(90deg, rgba(255,255,255,0), var(--tracer));
+        filter: drop-shadow(0 0 3px var(--tracer));
+      }
+      .skin-tracer::after {
+        content: ""; position: absolute; right: -2px; top: -2px; width: 8px; height: 8px;
+        border-radius: 50%; background: var(--tracer);
+      }
+      .skin-name { font-weight: 800; font-size: 15px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .skin-card .btn { width: 100%; padding: 9px 6px; font-size: 14px; }
+
+      .store-foot { display: flex; flex-direction: column; align-items: center; gap: 10px; margin-top: 18px; text-align: center; }
+      .store-note { font-size: 12px; font-weight: 700; opacity: 0.55; }
+      .store-status { min-height: 1.4em; font-size: 13px; font-weight: 700; opacity: 0.85; }
+
+      /* settings rows + switches */
+      .set-list { display: flex; flex-direction: column; gap: 10px; width: 100%; }
+      .set-row {
+        display: flex; align-items: center; gap: 12px; min-height: 58px; padding: 10px 14px;
+        background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+      }
+      .set-text { flex: 1; min-width: 0; }
+      .set-label { display: block; font-weight: 800; font-size: 16px; cursor: pointer; }
+      .set-caption { margin-top: 2px; font-size: 12px; font-weight: 600; opacity: 0.6; }
+      .set-row.disabled .set-label { opacity: 0.5; cursor: default; }
+      .set-danger { display: flex; justify-content: center; margin-top: 20px; }
+      .switch {
+        position: relative; flex: none; width: 52px; height: 30px; padding: 0; cursor: pointer;
+        border-radius: 999px; border: 1px solid rgba(255,255,255,0.25); background: rgba(255,255,255,0.16);
+        transition: background-color 0.15s ease;
+      }
+      .switch::before { content: ""; position: absolute; inset: -8px -6px; }
+      .switch-knob {
+        position: absolute; top: 3px; left: 3px; width: 22px; height: 22px; border-radius: 50%;
+        background: #fff; box-shadow: 0 2px 4px rgba(0,0,0,0.4);
+        transition: transform 0.15s ease;
+      }
+      .switch[aria-checked="true"] { background: var(--green); border-color: transparent; }
+      .switch[aria-checked="true"] .switch-knob { transform: translateX(22px); }
+      .switch:disabled { cursor: default; opacity: 0.4; }
+
+      .sr-only {
+        position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; border: 0;
+        overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap;
+      }
+
       .hidden { display: none !important; }
 
       @media (prefers-reduced-motion: reduce) {
         #crowd-count.danger { animation: none; opacity: 1; text-shadow: 0 3px 0 rgba(0,0,0,0.35), 0 0 18px rgba(255,90,82,0.8); }
         .btn.reveal.shown { animation: none; }
         #hint { animation: none; }
+        .icon-btn, .switch, .switch-knob { transition: none; }
       }
     </style>
   </head>
@@ -167,10 +343,31 @@
       <div id="vignette"></div>
       <div id="hud">
         <div id="topbar">
+          <button id="gear" class="icon-btn" type="button" aria-label="Settings" data-mode="settings">
+            <svg class="ico-gear" viewBox="0 0 24 24" aria-hidden="true">
+              <g fill="currentColor">
+                <path fill-rule="evenodd" d="M12 4.6a7.4 7.4 0 1 1 0 14.8a7.4 7.4 0 1 1 0-14.8zM12 9a3 3 0 1 0 0 6a3 3 0 1 0 0-6z" />
+                <rect x="10.1" y="1.4" width="3.8" height="5" rx="1" />
+                <rect x="10.1" y="1.4" width="3.8" height="5" rx="1" transform="rotate(45 12 12)" />
+                <rect x="10.1" y="1.4" width="3.8" height="5" rx="1" transform="rotate(90 12 12)" />
+                <rect x="10.1" y="1.4" width="3.8" height="5" rx="1" transform="rotate(135 12 12)" />
+                <rect x="10.1" y="1.4" width="3.8" height="5" rx="1" transform="rotate(180 12 12)" />
+                <rect x="10.1" y="1.4" width="3.8" height="5" rx="1" transform="rotate(225 12 12)" />
+                <rect x="10.1" y="1.4" width="3.8" height="5" rx="1" transform="rotate(270 12 12)" />
+                <rect x="10.1" y="1.4" width="3.8" height="5" rx="1" transform="rotate(315 12 12)" />
+              </g>
+            </svg>
+            <svg class="ico-pause" viewBox="0 0 24 24" aria-hidden="true">
+              <g fill="currentColor">
+                <rect x="6" y="5" width="4.4" height="14" rx="1.3" />
+                <rect x="13.6" y="5" width="4.4" height="14" rx="1.3" />
+              </g>
+            </svg>
+          </button>
           <span id="level-label">LEVEL 1</span>
           <div id="progress-track"><div id="progress-fill"></div></div>
+          <div id="coins">0</div>
         </div>
-        <div id="coins">0</div>
         <div id="popups"></div>
         <div id="crowd-count">0</div>
         <div id="hint">Drag left / right to steer</div>
