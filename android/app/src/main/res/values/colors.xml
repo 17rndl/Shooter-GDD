@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Same navy as the web ink colour and capacitor.config backgroundColor, so the window, the
+         splash and the WebView never flash white between each other. -->
+    <color name="app_background">#0A0E1A</color>
+</resources>

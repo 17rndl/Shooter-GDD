@@ -8,6 +8,8 @@ import { CrowdController } from '../crowd/CrowdController';
 import { BulletPool } from '../combat/BulletPool';
 import { ParticlePool } from '../combat/ParticlePool';
 import { InputSystem } from '../systems/InputSystem';
+import { QualityManager } from '../systems/QualityManager';
+import type { QualityTier } from '../systems/QualityPolicy';
 import { HUD, type OverlayOpts } from '../ui/HUD';
 import { ShopPanel } from '../ui/ShopPanel';
 import { SettingsPanel } from '../ui/SettingsPanel';
@@ -15,7 +17,10 @@ import { SaveService } from '../services/SaveService';
 import { AudioService, type MusicIntensity } from '../services/AudioService';
 import { AdGate, AdServiceStub, type RewardKind } from '../services/AdService';
 import { IapServiceStub, type IIapService } from '../services/IapService';
-import { WebHapticsService, type IHapticsService } from '../services/HapticsService';
+import type { IHapticsService } from '../services/HapticsService';
+import { isNative, platform } from '../platform/Platform';
+import { createLifecycle, type IAppLifecycle } from '../platform/AppLifecycle';
+import { createHaptics } from '../platform/NativeHaptics';
 import { GatePair, type GateResult } from '../entities/GatePair';
 import { Barricade } from '../entities/Barricade';
 import { EnemyCrowd } from '../entities/EnemyCrowd';
@@ -32,6 +37,10 @@ const LOOK_AHEAD = 7;
 // (ConfigLoader only warns about a malformed skin; it never fails the boot).
 const DEFAULT_UNIT_COLOR = 0x4ea3ff;
 const DEFAULT_TRACER_COLOR = 0xfff1a8;
+// Where AUTO graphics starts before it has measured anything. Phones run the
+// app at their full device pixel ratio, so the shell starts one tier down and
+// climbs only if the frame rate shows it can.
+const AUTO_START_TIER: QualityTier = isNative ? 'medium' : 'high';
 
 function hexColor(css: string, fallback: number): number {
   return /^#[0-9a-f]{6}$/i.test(css) ? parseInt(css.slice(1), 16) : fallback;
@@ -65,7 +74,9 @@ export class GameManager {
 
   private save = new SaveService();
   private audio = new AudioService();
-  private haptics: IHapticsService = new WebHapticsService();
+  private haptics: IHapticsService = createHaptics();
+  private readonly lifecycle: IAppLifecycle = createLifecycle();
+  private quality: QualityManager;
   private ads!: AdGate;
   private iap!: IIapService;
   private levels!: ILevelRepository;
@@ -105,6 +116,10 @@ export class GameManager {
   private paused = false;
   private adOpen = false; // between AdGate's onAdOpen and onAdClose: the ad owns the screen
   private shopOpen = false;
+  // The lifecycle's view, not document.hidden: in the native shell appStateChange
+  // can report the app backgrounded before (or without) the WebView's own event.
+  private appHidden = document.hidden;
+  private glLost = false; // WebGL context gone: no rendering, the world holds still
   // Bumped on every overlay show/hide, so an ad that resolves late can tell
   // whether the screen whose button started it is still the one up.
   private overlayGen = 0;
@@ -127,7 +142,7 @@ export class GameManager {
 
   constructor(canvas: HTMLCanvasElement) {
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-    this.renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
+    // pixel ratio: QualityManager's, set below once the sun exists
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -148,6 +163,9 @@ export class GameManager {
     sc.left = -8; sc.right = 8; sc.top = 12; sc.bottom = -12; sc.near = 1; sc.far = 40;
     this.scene.add(this.sun);
     this.scene.add(this.sun.target);
+    // Built against the high-tier setup above; applySettings() then pushes the
+    // saved graphics mode (pixel ratio, shadows) before the first frame.
+    this.quality = new QualityManager(this.renderer, this.sun, this.scene, () => this.resize());
 
     // The save loads synchronously, so saved Sound/Music/Haptics apply before any
     // gesture can unlock audio: a tap while boot() is still fetching (or after it
@@ -162,15 +180,27 @@ export class GameManager {
 
     // Backgrounded (tab switch, phone lock, app switcher): a live run pauses so
     // the player comes back to the pause sheet, and audio goes silent whatever
-    // the state. pagehide/pageshow cover a bfcache round-trip. Registered here,
-    // not in boot(), so a slow or failed boot still goes silent; no run can be
-    // live before boot() has built the panels, so pause() is never reached early.
-    document.addEventListener('visibilitychange', () => {
-      if (document.hidden) this.onHidden();
-      else this.onVisible();
+    // the state. The lifecycle folds visibility, pagehide/pageshow (bfcache) and
+    // the native app state into one deduped signal. Registered here, not in
+    // boot(), so a slow or failed boot still goes silent; no run can be live
+    // before boot() has built the panels, so pause() is never reached early.
+    this.lifecycle.onHidden(() => this.onHidden());
+    this.lifecycle.onVisible(() => this.onVisible());
+
+    // GPU reset (driver crash, too many contexts, Android trimming a background
+    // app): preventDefault asks for a restore. A live run waits on the pause
+    // sheet, and tick() neither renders nor simulates until the context is back.
+    canvas.addEventListener('webglcontextlost', (e) => {
+      e.preventDefault();
+      this.glLost = true;
+      this.pauseIfLive();
     });
-    window.addEventListener('pagehide', () => this.onHidden());
-    window.addEventListener('pageshow', () => { if (!document.hidden) this.onVisible(); });
+    canvas.addEventListener('webglcontextrestored', () => {
+      this.glLost = false;
+      // three re-inits its GL state itself; shadow maps and material programs
+      // are rebuilt from the tier, which also resizes
+      this.quality.reapply();
+    });
 
     window.addEventListener('resize', () => this.resize());
     this.resize();
@@ -192,8 +222,8 @@ export class GameManager {
       },
       onAdClose: () => {
         this.adOpen = false;
-        // closed while backgrounded: stay silent, visibilitychange resumes
-        if (!document.hidden) this.audio.resume();
+        // closed while backgrounded: stay silent, onVisible resumes
+        if (!this.appHidden) this.audio.resume();
         this.refreshGear();
       },
       adsRemoved: () => this.save.get().removeAds,
@@ -209,7 +239,11 @@ export class GameManager {
     this.shop.onSkinChanged = () => this.applySkin();
     this.shop.onCoinsChanged = () => this.hud.setCoins(this.save.get().coins);
     this.settings = new SettingsPanel(this.save, this.audio, this.haptics);
+    this.settings.onGraphicsChanged = (mode) => this.quality.setMode(mode, AUTO_START_TIER);
     this.hud.onGear = () => this.onGear();
+    // Only once the panels exist: until then (and after a failed boot) nothing
+    // claims the press, so native back leaves the app as it would a splash.
+    this.lifecycle.onBack(() => this.onBack());
 
     this.crowd = new CrowdController(this.cfg, this.scene, DEFAULT_UNIT_COLOR);
     this.bullets = new BulletPool(this.cfg.combat.maxVisibleBullets, DEFAULT_TRACER_COLOR, this.scene);
@@ -237,9 +271,9 @@ export class GameManager {
 
     let last = performance.now();
     const loop = (now: number) => {
-      const dtReal = Math.min(0.05, (now - last) / 1000);
+      const frame = (now - last) / 1000;
       last = now;
-      this.tick(dtReal);
+      this.tick(Math.min(0.05, frame), frame);
       requestAnimationFrame(loop);
     };
     requestAnimationFrame(loop);
@@ -615,16 +649,46 @@ export class GameManager {
     this.showMenu();
   }
 
-  private onHidden(): void {
+  /** Backgrounded or GPU reset: a live run drops to the pause sheet, unless an ad owns the screen. */
+  private pauseIfLive(): void {
     if ((this.state === 'PLAYING' || this.state === 'BOSS') && !this.paused && !this.adOpen) this.pause();
+  }
+
+  private onHidden(): void {
+    this.appHidden = true;
+    this.pauseIfLive();
     this.audio.suspend();
   }
 
   private onVisible(): void {
+    this.appHidden = false;
     // A revive, bonus start or level change can take a run live while hidden (its
     // ad or fetch settled in the background): come back to the pause sheet anyway.
-    if ((this.state === 'PLAYING' || this.state === 'BOSS') && !this.paused && !this.adOpen) this.pause();
+    this.pauseIfLive();
     if (!this.adOpen) this.audio.resume(); // an open ad resumes audio itself, on close
+  }
+
+  /**
+   * Android back / web Escape. True = handled; false (only on the menu) lets
+   * the native shell exit. Never skips a screen the player has to see: a result
+   * screen or an ad in flight swallows it.
+   */
+  private onBack(): boolean {
+    if (this.settings.isOpen) {
+      this.settings.close(); // RESUME on the pause sheet, BACK on the menu one
+      return true;
+    }
+    if (this.shopOpen) {
+      this.shop.close(); // returns to whichever screen opened it
+      return true;
+    }
+    // an ad loading or up, or a level change in flight: never quit from under it
+    if (this.adOpen || this.uiLocked()) return true;
+    if (this.state === 'PLAYING' || this.state === 'BOSS') {
+      this.pause();
+      return true;
+    }
+    return this.state !== 'MENU'; // WIN / REWARD / LOSE: only their buttons move on
   }
 
   /** Saved settings → live services (at construction, before any gesture can unlock audio). */
@@ -633,6 +697,7 @@ export class GameManager {
     this.audio.setSfxEnabled(s.sound);
     this.audio.setMusicEnabled(s.music);
     this.haptics.enabled = s.haptics;
+    this.quality.setMode(s.graphics, AUTO_START_TIER);
   }
 
   /** Equipped skin → unit body and tracer tint. An id the catalog lost falls back to skins[0]. */
@@ -653,11 +718,13 @@ export class GameManager {
   }
 
   // ---------------------------------------------------------------- main tick
-  private tick(dtReal: number): void {
-    // Paused or under an ad, the world holds still: no sim, no particles, no
-    // entity bob, no camera drift, no slow-mo recovery. Only the HUD keeps real
-    // time, so a count or coin roll-up already under way still lands.
-    const frozen = this.paused || this.adOpen;
+  /** `frameSec`: the raw, unclamped frame time, which only the quality sampler reads. */
+  private tick(dtReal: number, frameSec: number): void {
+    // Paused, under an ad or without a GPU context, the world holds still: no
+    // sim, no particles, no entity bob, no camera drift, no slow-mo recovery.
+    // Only the HUD keeps real time, so a count or coin roll-up already under
+    // way still lands. (A RESUME tapped before the context is back stays frozen.)
+    const frozen = this.paused || this.adOpen || this.glLost;
     const dtWorld = frozen ? 0 : dtReal;
     this.time += dtWorld;
     // ease slow-mo
@@ -665,6 +732,9 @@ export class GameManager {
     const dt = dtWorld * this.timeScale;
 
     if ((this.state === 'PLAYING' || this.state === 'BOSS') && !frozen) {
+      // Live play only: menus and overlays are cheaper than a run and would
+      // read as headroom. Unclamped, so a hitch is seen as one and skipped.
+      this.quality.sample(frameSec);
       this.simulate(dt);
     }
     // Unconditional: death pops and the count roll-up must finish playing while
@@ -673,7 +743,7 @@ export class GameManager {
     this.hud.update(dtReal);
     this.updateEntitiesVisual(dt);
     this.updateCamera(dtWorld);
-    this.renderer.render(this.scene, this.camera);
+    if (!this.glLost) this.renderer.render(this.scene, this.camera);
   }
 
   private simulate(dt: number): void {
@@ -1283,6 +1353,10 @@ export class GameManager {
       settings: { ...this.save.get().settings },
       removeAds: this.save.get().removeAds,
       levelCount: this.levels ? this.levels.count : null,
+      platform,
+      tier: this.quality.tier,
+      graphics: this.quality.mode,
+      glLost: this.glLost,
     };
   }
 

@@ -1,6 +1,9 @@
 // Haptics behind an interface so a native port can bind Core Haptics / Android
 // VibrationEffect without touching game code. The web build uses
 // navigator.vibrate (Android Chrome); iOS Safari has none, so `supported` is false.
+// The native shell's service lives in src/platform/NativeHaptics.ts and shares
+// HapticThrottle, so both builds drop exactly the same pulses.
+// No runtime imports and no DOM at load: Node unit-tests this file directly.
 
 export type HapticKind = 'light' | 'medium' | 'heavy' | 'warn' | 'success' | 'fail';
 
@@ -43,13 +46,35 @@ const LENGTH: Record<HapticKind, number> = {
   fail: lengthMs(PATTERN.fail),
 };
 
+/**
+ * Priority throttle: an equal or lesser pulse within MIN_GAP_MS of the last one is
+ * dropped, and a lesser one never cuts a running pattern short — vibrate() and
+ * Android's VibrationEffect both replace whatever is buzzing, so a stray 'light'
+ * would truncate a boss kill. A true answer commits `kind` as the running pulse.
+ */
+export class HapticThrottle {
+  private lastAt = -Infinity;
+  private lastPriority = -1;
+  private busyUntil = -Infinity; // when the last fired pattern finishes buzzing
+
+  allow(kind: HapticKind, nowMs: number): boolean {
+    const pr = PRIORITY[kind];
+    if (pr <= this.lastPriority) {
+      if (nowMs - this.lastAt < MIN_GAP_MS) return false;
+      if (pr < this.lastPriority && nowMs < this.busyUntil) return false;
+    }
+    this.lastAt = nowMs;
+    this.lastPriority = pr;
+    this.busyUntil = nowMs + LENGTH[kind];
+    return true;
+  }
+}
+
 export class WebHapticsService implements IHapticsService {
   enabled = true;
   readonly supported: boolean;
   private nav: Navigator | null;
-  private lastAt = -Infinity;
-  private lastPriority = -1;
-  private busyUntil = -Infinity; // when the last fired pattern finishes buzzing
+  private readonly throttle = new HapticThrottle();
 
   constructor() {
     const nav = typeof navigator !== 'undefined' ? navigator : null;
@@ -63,20 +88,11 @@ export class WebHapticsService implements IHapticsService {
     // browsers refuse (and log an intervention for) vibrate before the first tap
     const ua: UserActivation | undefined = nav.userActivation;
     if (ua && !ua.hasBeenActive) return;
-    const now = performance.now();
-    const pr = PRIORITY[kind];
-    if (pr <= this.lastPriority) {
-      if (now - this.lastAt < MIN_GAP_MS) return;
-      // vibrate() replaces the running pattern, so a lesser pulse would cut a boss kill mid-buzz
-      if (pr < this.lastPriority && now < this.busyUntil) return;
-    }
+    if (!this.throttle.allow(kind, performance.now())) return;
     try {
       nav.vibrate(PATTERN[kind]);
     } catch {
-      return;
+      // unreachable for these well-formed patterns; one that threw still holds its throttle slot
     }
-    this.lastAt = now;
-    this.lastPriority = pr;
-    this.busyUntil = now + LENGTH[kind];
   }
 }

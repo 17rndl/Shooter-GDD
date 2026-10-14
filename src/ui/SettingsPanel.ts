@@ -1,3 +1,4 @@
+import type { GraphicsMode } from '../data/types';
 import type { SaveService } from '../services/SaveService';
 import type { AudioService } from '../services/AudioService';
 import type { IHapticsService } from '../services/HapticsService';
@@ -12,6 +13,12 @@ export interface SettingsOpenOpts {
 }
 
 type ToggleKey = 'sound' | 'music' | 'haptics';
+
+const GRAPHICS: readonly { mode: GraphicsMode; label: string; caption: string }[] = [
+  { mode: 'auto', label: 'AUTO', caption: 'Adapts to your device' },
+  { mode: 'high', label: 'HIGH', caption: 'Sharpest, with shadows' },
+  { mode: 'low', label: 'LOW', caption: 'Smoothest, no shadows' },
+];
 
 const RESET_CONFIRM_MS = 3000;
 // a confirm this soon after arming is the same gesture (double-tap, double-click), not a decision
@@ -29,11 +36,16 @@ function make<K extends keyof HTMLElementTagNameMap>(
 // Settings sheet, doubling as the pause menu mid-run. Every toggle writes the
 // save and applies live, so closing never has anything left to commit.
 export class SettingsPanel {
+  /** After the player picks a different graphics mode (already saved). */
+  onGraphicsChanged: ((mode: GraphicsMode) => void) | null = null;
+
   private root: HTMLDivElement;
   private titleEl: HTMLHeadingElement;
   private switches: Record<ToggleKey, HTMLButtonElement>;
   private hapticsRow!: HTMLDivElement;
   private hapticsNote!: HTMLDivElement;
+  private graphicsBtns: HTMLButtonElement[] = [];
+  private graphicsNote!: HTMLDivElement;
   private resetWrap: HTMLDivElement;
   private resetBtn: HTMLButtonElement;
   private primaryBtn: HTMLButtonElement;
@@ -70,6 +82,7 @@ export class SettingsPanel {
       music: this.makeToggle(list, 'music', 'Music'),
       haptics: this.makeToggle(list, 'haptics', 'Haptics'),
     };
+    this.makeGraphics(list);
     scroll.appendChild(list);
 
     this.resetWrap = make('div', 'set-danger');
@@ -192,12 +205,56 @@ export class SettingsPanel {
     return sw;
   }
 
+  /** A full-width segmented control under its label, so it fits a 320 px screen. */
+  private makeGraphics(list: HTMLDivElement): void {
+    const row = make('div', 'set-row stack');
+    const text = make('div', 'set-text');
+    // a group, not a labelable control: a plain text label, not <label for>
+    const lab = make('div', 'set-label', 'Graphics');
+    lab.id = 'set-graphics-label';
+    this.graphicsNote = make('div', 'set-caption');
+    this.graphicsNote.id = 'set-graphics-note';
+    text.append(lab, this.graphicsNote);
+
+    const seg = make('div', 'seg');
+    seg.setAttribute('role', 'group');
+    seg.setAttribute('aria-labelledby', 'set-graphics-label');
+    seg.setAttribute('aria-describedby', 'set-graphics-note');
+    for (const g of GRAPHICS) {
+      const b = make('button', 'seg-btn', g.label);
+      b.type = 'button';
+      b.setAttribute('aria-pressed', 'false');
+      b.onclick = () => this.setGraphics(g.mode);
+      this.graphicsBtns.push(b);
+      seg.appendChild(b);
+    }
+    row.append(text, seg);
+    list.appendChild(row);
+  }
+
+  private syncGraphics(mode: GraphicsMode): void {
+    for (let i = 0; i < GRAPHICS.length; i++) {
+      const on = GRAPHICS[i].mode === mode;
+      this.graphicsBtns[i].setAttribute('aria-pressed', String(on));
+      if (on) this.graphicsNote.textContent = GRAPHICS[i].caption;
+    }
+  }
+
+  private setGraphics(mode: GraphicsMode): void {
+    if (mode === this.save.get().settings.graphics) return;
+    this.save.setGraphics(mode);
+    this.syncGraphics(mode);
+    this.audio.play('click');
+    this.onGraphicsChanged?.(mode);
+  }
+
   /** Reflect the saved settings (the save is the source of truth, not the switches). */
   private sync(): void {
     const s = this.save.get().settings;
     const hapticsOk = this.haptics.supported;
     this.setSwitch('sound', s.sound);
     this.setSwitch('music', s.music);
+    this.syncGraphics(s.graphics);
     // unsupported shows OFF: the device can't buzz whatever the saved preference says
     this.setSwitch('haptics', hapticsOk && s.haptics);
     const sw = this.switches.haptics;

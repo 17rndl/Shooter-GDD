@@ -1,6 +1,6 @@
 {
   "name": "crowd-shooter-runner",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "Hyper-casual 3D crowd runner / auto-shooter — Three.js prototype",
@@ -8,14 +8,23 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "balance": "node scripts/balance-sim.mjs"
+    "balance": "node scripts/balance-sim.mjs",
+    "balance:check": "node scripts/check-balance.mjs",
+    "cap:sync": "npm run build && cap sync android",
+    "android:apk": "npm run cap:sync && cd android && ./gradlew assembleDebug"
   },
   "devDependencies": {
+    "@capacitor/cli": "8.5.2",
     "@types/three": "^0.170.0",
     "typescript": "^5.7.0",
     "vite": "^6.0.0"
   },
   "dependencies": {
+    "@capacitor/android": "8.5.2",
+    "@capacitor/app": "8.1.1",
+    "@capacitor/core": "8.5.2",
+    "@capacitor/haptics": "8.0.2",
+    "@capacitor/status-bar": "8.0.3",
     "three": "^0.170.0"
   }
 }
