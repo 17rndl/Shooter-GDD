@@ -3,3 +3,15 @@ dist
 *.local
 .DS_Store
 .vite
+
+# Android shell (android/.gitignore also keeps the copied web bundle and plugin glue out)
+android/.gradle/
+android/build/
+android/app/build/
+android/app/release/
+android/capacitor-cordova-android-plugins/build/
+android/local.properties
+android/.idea/
+*.keystore
+*.jks
+keystore.properties

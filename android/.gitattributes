@@ -1,0 +1,6 @@
+# Keep the Gradle wrapper runnable on both Linux CI and Windows checkouts.
+gradlew text eol=lf
+*.bat text eol=crlf
+*.jar binary
+*.png binary
+*.webp binary

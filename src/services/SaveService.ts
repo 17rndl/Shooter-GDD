@@ -1,4 +1,4 @@
-import type { SaveData } from '../data/types';
+import type { GraphicsMode, SaveData } from '../data/types';
 
 const KEY = 'csr_save_v1';
 const DEFAULT_SKIN = 'default';
@@ -8,7 +8,7 @@ const DEFAULT_SAVE: SaveData = {
   coins: 0,
   bestPeak: 0,
   upgrades: { bulletPower: 0, fireRate: 0, startingCrowd: 0, income: 0 },
-  settings: { sound: true, music: true, haptics: true },
+  settings: { sound: true, music: true, haptics: true, graphics: 'auto' },
   ownedSkins: [DEFAULT_SKIN],
   equippedSkin: DEFAULT_SKIN,
   removeAds: false,
@@ -22,14 +22,20 @@ function flag(v: unknown, fallback: boolean): boolean {
   return v === undefined || v === null ? fallback : !!v;
 }
 
+// a mode a later build adds (or a typo) reads as auto, the safe adaptive default
+function graphicsMode(v: unknown): GraphicsMode {
+  return v === 'high' || v === 'low' ? v : 'auto';
+}
+
 function record(v: unknown): Record<string, unknown> {
   return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
 }
 
 /**
- * Any parsed blob → a well-formed SaveData. Old saves predate music, skins and
- * removeAds, so missing fields take defaults; a hand-edited or corrupt save can
- * never hand the game a NaN balance, a level below 1, or an unowned skin.
+ * Any parsed blob → a well-formed SaveData. Old saves predate music, skins,
+ * removeAds and the graphics mode, so missing fields take defaults; a
+ * hand-edited or corrupt save can never hand the game a NaN balance, a level
+ * below 1, an unowned skin or an unknown graphics mode.
  * Skin ids are not checked against the catalog here (the game resolves them).
  */
 export function sanitizeSave(raw: unknown): SaveData {
@@ -62,6 +68,7 @@ export function sanitizeSave(raw: unknown): SaveData {
       sound: flag(st.sound, d.settings.sound),
       music: flag(st.music, d.settings.music),
       haptics: flag(st.haptics, d.settings.haptics),
+      graphics: graphicsMode(st.graphics),
     },
     ownedSkins: owned,
     equippedSkin: equipped,
@@ -125,6 +132,11 @@ export class SaveService {
 
   setSetting(key: 'sound' | 'music' | 'haptics', on: boolean): void {
     this.data.settings[key] = on;
+    this.save();
+  }
+
+  setGraphics(mode: GraphicsMode): void {
+    this.data.settings.graphics = graphicsMode(mode);
     this.save();
   }
 

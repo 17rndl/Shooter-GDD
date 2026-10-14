@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Crowd Shooter Runner</string>
+    <string name="title_activity_main">Crowd Shooter Runner</string>
+    <string name="package_name">com.rndl.crowdshooter</string>
+    <string name="custom_url_scheme">com.rndl.crowdshooter</string>
+</resources>

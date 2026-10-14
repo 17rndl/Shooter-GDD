@@ -1,4 +1,9 @@
 import { GameManager } from './core/GameManager';
+import { enterImmersive } from './platform/Platform';
+
+// Native shell only (a no-op on the web); never rejects. MainActivity re-hides
+// the bars itself on every resume, so once at boot is enough.
+void enterImmersive();
 
 const canvas = document.getElementById('gl') as HTMLCanvasElement;
 const game = new GameManager(canvas);

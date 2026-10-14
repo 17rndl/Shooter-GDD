@@ -7,9 +7,10 @@ Built with **TypeScript + Three.js + Vite** — the GDD's recommended "validate 
 in-browser" path (Claude Code can build, run, and verify this end-to-end; it cannot drive
 the Unity editor). The shippable target stays Unity; this proves out the design and tuning.
 
-It is a **web app**, not a native app and not React Native (there is no React anywhere): it
-runs in a browser, with a plain-DOM HUD over a WebGL canvas. The ship target is a native
-**Unity (C#) Android** build; [`docs/UNITY_PORT.md`](docs/UNITY_PORT.md) is the port guide.
+It is a **web app** with a plain-DOM HUD over a WebGL canvas (no React, no React Native).
+The same bundle also ships as an **installable Android app** inside a Capacitor WebView shell
+(see [Android app (Capacitor)](#android-app-capacitor)). The long-term native target is still
+a **Unity (C#) Android** build; [`docs/UNITY_PORT.md`](docs/UNITY_PORT.md) is the port guide.
 
 ## Run it
 
@@ -19,7 +20,10 @@ npm run dev      # open the printed http://localhost:PORT
 ```
 
 - **Drag left / right** (mouse or touch) to steer the crowd. Everything else is automatic.
-- Build for static hosting: `npm run build` → `dist/` (relative paths, opens anywhere).
+- Build for static hosting: `npm run build` → `dist/` (relative paths, opens anywhere). It
+  carries a web manifest and icons, so a phone browser's "Add to Home screen" gets the real
+  name and icon (and a fullscreen portrait launch where the browser honours the manifest).
+- Android APK: see [Android app (Capacitor)](#android-app-capacitor).
 
 ## What's implemented (GDD §16 phases 1–7, all verified)
 
@@ -73,11 +77,17 @@ services behind interfaces with stubs (see the meta & services pass below).
 
 ```
 src/
-  main.ts                  boot (config → level manifest → GameManager), failed-boot screen
+  main.ts                  boot (immersive → GameManager → config → level manifest), failed-boot screen
   core/GameManager.ts      state machine (MENU→PLAYING⇄BOSS→WIN→REWARD / LOSE→revive), pause,
-                           ad/visibility hooks, system tick order
+                           ad / lifecycle / back-button hooks, quality + context-loss wiring,
+                           system tick order
   core/WorldSpace.ts       WORLD_X_SIGN + screenToWorldX: the one place that knows the X mirror
-  systems/InputSystem.ts   drag → normalized steer
+  platform/Platform.ts     isNative / platform ('android' | 'ios' | 'web'), enterImmersive()
+  platform/AppLifecycle.ts one deduped hidden / visible signal + back button (Escape on the web)
+  platform/NativeHaptics.ts  @capacitor/haptics service; createHaptics() picks native or web
+  systems/InputSystem.ts   drag → normalized steer (first finger only, pointer capture)
+  systems/QualityPolicy.ts render tiers + the AUTO step-down / step-up rule (pure, Node-testable)
+  systems/QualityManager.ts  applies a tier to the renderer: pixel-ratio cap, shadows
   crowd/                   CrowdController (count + formation + DPS), UnitInstancer (GPU-instanced units)
   combat/BulletPool.ts     capped pooled visual tracers (tinted by the equipped skin)
   combat/ParticlePool.ts   pooled sparks, death pops
@@ -88,7 +98,7 @@ src/
   ui/SettingsPanel.ts      settings sheet, doubles as the in-run pause menu
   services/SaveService.ts      localStorage save + sanitize/migrate (sanitizeSave)
   services/AudioService.ts     WebAudio SFX + procedural 3-intensity music loop
-  services/HapticsService.ts   IHapticsService → navigator.vibrate, priority throttle
+  services/HapticsService.ts   IHapticsService, HapticThrottle (shared), navigator.vibrate service
   services/AdService.ts        IAdService (SDK adapter, stubbed) + AdGate (every ad rule)
   services/IapService.ts       IIapService (store adapter, stubbed)
   data/types.ts            config / level / save contracts
@@ -99,7 +109,13 @@ public/
   config.json              all tuning numbers (GDD §14.1 / §15), skins, ad cadence
   levels/index.json        level manifest: {"levels": [...]} in play order
   levels/level_00{1,2,3}.json   JSON-driven levels, scaling difficulty (GDD §14.2)
+  manifest.webmanifest     PWA manifest (fullscreen, portrait, navy theme)
+  icons/                   PWA icons (rendered from resources/icon.svg)
 scripts/balance-sim.mjs    balance regression test (`npm run balance`)
+capacitor.config.ts        app id / name, webDir 'dist', native plugin config
+android/                   Capacitor Android project (MainActivity: portrait, immersive, screen on)
+resources/                 icon.svg master + render-icons.mjs (headless Edge rasterizer)
+.github/workflows/         ci.yml (web checks), android.yml (debug APK + release AAB)
 docs/UNITY_PORT.md         Unity port guide
 ```
 
@@ -180,17 +196,144 @@ beat of the arc a physical signal, all pooled and allocation-free:
   [`docs/UNITY_PORT.md`](docs/UNITY_PORT.md) maps every file to its Unity home and lists the
   JS-vs-C# numeric traps the balance sim depends on.
 
+## Android app (Capacitor)
+
+The web build runs unchanged inside a **Capacitor 8** WebView shell: `android/` was generated by
+`npx cap add android` and then customised. It is one bundle for both: in a browser
+`src/platform/Platform.ts` reports `'web'` and every native call is skipped.
+
+What the shell adds:
+
+- **Portrait, immersive fullscreen** — `MainActivity` locks portrait (the manifest's
+  `appCategory="game"` keeps that lock on Android 16+ tablets and foldables), hides the status
+  and navigation bars (a swipe from the edge shows them briefly over the game), draws edge to edge
+  into the display cutout and keeps the screen on while the game is in front. Every window
+  background is navy `#0a0e1a`, so there is no white flash, and Android 12+ gets a navy splash
+  with the launcher icon. The HUD clears notches and the gesture bar via `env(safe-area-inset-*)`.
+- **Back button** — `src/platform/AppLifecycle.ts` routes hardware / gesture back: it closes
+  Settings (RESUME on the pause sheet, BACK on the menu) or the Shop, pauses a live run, is
+  swallowed on the result screens and while an ad or level change is in flight (a stray back
+  never skips a reward), and leaves the app from the menu.
+- **Backgrounding** — native app state, page visibility and pagehide / pageshow are folded into
+  one hidden / visible signal that fires once per real transition: a live run pauses, audio
+  goes silent.
+- **Native haptics** — `@capacitor/haptics` (impact light / medium / heavy, notification
+  warning / success / error) behind `IHapticsService`, through the same priority throttle as
+  the web's `navigator.vibrate` service.
+- **Adaptive quality** — Settings → **Graphics: AUTO / HIGH / LOW**. HIGH is pixel ratio up to
+  2 with 1024 px shadows, LOW is pixel ratio 1 with no shadows. AUTO starts on the middle tier
+  in the app (pixel ratio up to 1.5, 512 px shadows; on high in a browser) and measures live
+  play only: a 3 s window slower than 45 fps drops a tier at once; climbing back takes 10 s of
+  windows faster than 57 fps, at least 20 s after the last drop, so it never flaps. The rule is
+  `src/systems/QualityPolicy.ts` (pure, Node-testable).
+- **WebGL context loss** — the run pauses and nothing renders or simulates; on restore the tier
+  is re-applied (shadow maps and shaders rebuilt) and the run waits on the pause sheet.
+- **Touch hygiene** — only the first finger steers (a second one waits until it lifts); no
+  long-press callout, context menu, overscroll bounce, text selection or double-tap zoom.
+
+Identity: app id `com.rndl.crowdshooter` (a placeholder, see below), name "Crowd Shooter
+Runner", version 0.2.0 / versionCode 2, minSdk 24, compile and target SDK 36. Permissions are
+INTERNET and VIBRATE only; cleartext traffic is off; WebView debugging is on in debug builds only.
+
+### CI builds
+
+GitHub Actions runs on every push: `.github/workflows/ci.yml` checks the web build and
+`.github/workflows/android.yml` builds the app on JDK 21 + Android SDK 36 (`npm ci`,
+`npm run build`, `npx cap sync android`, then Gradle). The Android run uploads two artifacts: a
+**debug APK** to install and a **release AAB** for Google Play. The AAB is signed when these
+repository secrets exist (Settings → Secrets and variables → Actions):
+
+| Secret | Value |
+| --- | --- |
+| `ANDROID_KEYSTORE_BASE64` | the upload keystore (`.jks`), base64-encoded |
+| `ANDROID_KEYSTORE_PASSWORD` | the keystore password |
+| `ANDROID_KEY_ALIAS` | the key's alias |
+| `ANDROID_KEY_PASSWORD` | the key's password |
+
+Without them the AAB is built unsigned: good for proving the build, not for uploading. Make a
+keystore once with the JDK's `keytool -genkeypair -v -keystore upload.jks -alias upload
+-keyalg RSA -keysize 2048 -validity 10000`, encode it with `base64 -w0 upload.jks` (Git Bash),
+and keep it out of the repo (`*.jks`, `*.keystore` and `keystore.properties` are gitignored).
+Losing it means losing the ability to update the app.
+
+### Install the APK on a phone
+
+1. GitHub → **Actions** → the latest Android workflow run → **Artifacts**: download the debug
+   APK (a zip) and unzip it.
+2. Either `adb install -r app-debug.apk` with USB debugging on, or copy the APK to the phone and
+   open it (allow "Install unknown apps" for the file manager or browser once).
+
+If an install over an older build fails with a signature mismatch (a CI runner can sign debug
+builds with its own debug key), uninstall the old build first. That also clears the save, which
+lives in the app's WebView storage.
+
+### Build locally
+
+Needs **JDK 21** and the **Android SDK with platform 36** (Android Studio installs both; point
+`ANDROID_HOME`, or `sdk.dir` in `android/local.properties`, at the SDK).
+
+```bash
+npm run cap:sync      # web build, copy it into android/, sync the plugins
+npm run android:apk   # cap:sync, then ./gradlew assembleDebug (macOS / Linux)
+```
+
+The APK lands in `android/app/build/outputs/apk/debug/app-debug.apk`. On Windows `android:apk`
+fails from every shell, Git Bash included: npm runs scripts through cmd.exe, which cannot run
+`./gradlew`. Run the two halves yourself instead: `npm run cap:sync`, then `cd android` and
+`gradlew.bat assembleDebug` (in PowerShell `.\gradlew.bat assembleDebug`, in Git Bash
+`./gradlew assembleDebug`). `npx cap open android` opens the project in Android Studio.
+Re-sync after every web change: the copied bundle in `android/app/src/main/assets/public` is
+gitignored and only `cap sync` refreshes it.
+
+### Before the first Play upload: change the app id
+
+`com.rndl.crowdshooter` is a placeholder, and Play never lets an app's id change after its first
+upload. Change it in:
+
+- `capacitor.config.ts` → `appId`
+- `android/app/build.gradle` → `applicationId` (the id Play sees) and `namespace`
+- the Java package: move `android/app/src/main/java/com/rndl/crowdshooter/MainActivity.java` to
+  the new package path and update its `package` line (it must match `namespace`, because the
+  manifest names the activity `.MainActivity`)
+- `android/app/src/main/res/values/strings.xml` → `package_name` and `custom_url_scheme`
+
+then run `npm run cap:sync`. Only `appId` and `applicationId` are strictly required; the
+namespace and the Java package can keep the old name, but if one changes, both must.
+
+### Icons
+
+`resources/icon.svg` is the master (1024 px, the art inside the central 66% so adaptive masks
+never clip it). `node resources/render-icons.mjs` rasterizes it with headless Edge into every
+Android launcher icon (adaptive foreground layers plus legacy square and round PNGs, mdpi to
+xxxhdpi) and the PWA icons in `public/icons/`; set `CHROME=/path/to/chrome-or-edge` to use
+another Chromium-based browser. `node resources/render-icons.mjs preview` writes a legibility
+contact sheet.
+
 ## Not yet built
 - Real **AppLovin MAX** wiring behind `IAdService` and **Unity IAP / Play Billing** behind
   `IIapService` (receipt validation included); the stubs and AdGate rules are ready for them.
-- The **Unity 6 / URP port** for an Android `.aab` itself (the actual ship target), following
-  `docs/UNITY_PORT.md`.
+  In the Capacitor shell they would be native plugins behind the same interfaces.
+- An **iOS shell**: `Platform`, `AppLifecycle` and the haptics already handle `'ios'`, but there
+  is no `ios/` project.
+- The **Unity 6 / URP port** (the long-term native target), following `docs/UNITY_PORT.md`.
 - **Art**: real unit, enemy and boss models and VFX in place of the primitive shapes.
 
 ## Dev/debug
 `window.__game` is exposed in the browser console: `__game.debug()` dumps live state (now
 including `paused`, `adOpen`, `adBusy`, `skin`, `music`, `settings`, `removeAds`,
-`levelCount`), `__game.debugSteer(0..1)` drives the steer target. Harmless; strip for production.
+`levelCount`, and from Phase F `platform`, `tier`, `graphics`, `glLost`),
+`__game.debugSteer(0..1)` drives the steer target. Harmless; strip for production.
+
+- **Escape is back** on the web, exactly like Android's back button (closes Settings or the
+  Shop, pauses a live run, does nothing on the menu and the result screens); it is ignored while
+  typing in a text field.
+- **Graphics** (Settings → Graphics) is saved as `settings.graphics` (`auto` / `high` / `low`;
+  older saves migrate to `auto`). `__game.debug().tier` shows the tier in force. A desktop
+  rarely leaves high on AUTO: to watch it step down, throttle the CPU in DevTools (Performance →
+  CPU 6× slowdown) during a run.
+- **Context loss**: in the console,
+  `const x = document.getElementById('gl').getContext('webgl2').getExtension('WEBGL_lose_context')`,
+  then `x.loseContext()` (the run pauses, `glLost: true`) and `x.restoreContext()`.
 
 Ad test flags (query string, stub SDK only):
 - `?adfail`: rewarded ads finish without granting a reward.

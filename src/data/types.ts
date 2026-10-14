@@ -134,13 +134,16 @@ export interface UpgradeLevels {
   income: number;
 }
 
+/** 'auto' adapts the render tier to the measured frame rate; 'high' / 'low' pin it. */
+export type GraphicsMode = 'auto' | 'high' | 'low';
+
 export interface SaveData {
   currentLevel: number;
   coins: number;
   /** Largest crowd ever reached across all runs — drives the NEW BEST badge. */
   bestPeak: number;
   upgrades: UpgradeLevels;
-  settings: { sound: boolean; music: boolean; haptics: boolean };
+  settings: { sound: boolean; music: boolean; haptics: boolean; graphics: GraphicsMode };
   ownedSkins: string[];
   /** A skin id from ownedSkins. Resolved against cfg.skins by the game, not here. */
   equippedSkin: string;

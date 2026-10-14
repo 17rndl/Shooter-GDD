@@ -1,0 +1,18 @@
+
+§15 balance — BEST (every good gate) vs WORST (every bad gate)
+attacks = the kinds the level's boss cycles; hits/lost = boss attacks the BEST
+path faced and the units they cost it; picked = units banked from crowd pickups
+
+level        best@boss  boss TTK  survivors  attacks           hits   lost   picked  worst dies                      
+-----------  ---------  --------  ---------  ----------------  -----  -----  ------  --------------------------  ----
+level_001    276        6.6s      93%        sweep_fire        2      1      32      z=50 barricade@50           PASS
+level_002    371        7.2s      93%        sweep_fire+slam   3      1      45      z=48 barricade@48           PASS
+level_003    482        8.0s      92%        sweep_fire+slam   3      1      65      z=41 enemy@52               PASS
+
+BEST path:
+  level_001.json: gate@22 add12 5→17 | broke barricade@50 | gate@78 mul2 17→34 | pickup@112 +12 → 46 | objective@132 +18 → 64 | broke barricade@156 | gate@160 mul4 64→256 | pickup@200 +20 → 276 | boss@222 standoff with 276 | boss sweep_fire@0.75 -1 → 262 | boss dead in 6.6s with 258 → finish with 258
+  level_002.json: gate@22 add18 5→23 | broke barricade@48 | gate@74 mul3 23→69 | pickup@102 +15 → 84 | objective@128 +30 → 114 | broke barricade@152 | gate@156 mul3 114→342 | killed enemy@184 | broke barricade@208 | pickup@194 +30 → 371 | boss@238 standoff with 371 | boss sweep_fire@0.75 -1 → 345 | boss dead in 7.2s with 344 → finish with 344
+  level_003.json: gate@24 add20 5→25 | gate@80 mul2 25→50 | broke barricade@106 | pickup@118 +25 → 75 | objective@132 +40 → 115 | broke barricade@156 | gate@160 add89 115→204 | killed enemy@188 | pickup@198 +40 → 241 | broke barricade@214 | gate@240 mul2 241→482 | boss@272 standoff with 482 | boss sweep_fire@0.75 -1 → 448 | boss dead in 8.0s with 444 → finish with 444
+
+All levels pass the §15 rule.
+

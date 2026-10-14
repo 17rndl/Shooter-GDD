@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- Crowd Shooter Runner launcher art (1024 master). Everything that matters stays inside a
+       ~320 px radius of the centre: the adaptive-icon circle mask keeps 341 px (66%), so every
+       launcher mask shape keeps it. id="bg" is stripped for the adaptive foreground layer. -->
+  <defs>
+    <radialGradient id="glow" cx="512" cy="560" r="440" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#4ea3ff" stop-opacity="0.36"/>
+      <stop offset="0.5" stop-color="#4ea3ff" stop-opacity="0.12"/>
+      <stop offset="1" stop-color="#4ea3ff" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="shadow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#000000" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#000000" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="body" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#9fd0ff"/>
+      <stop offset="0.34" stop-color="#4ea3ff"/>
+      <stop offset="1" stop-color="#215ab8"/>
+    </linearGradient>
+    <linearGradient id="shine" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.8"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <!-- One unit centred on the origin: navy keyline, shaded capsule, soft highlight. -->
+    <g id="unit">
+      <rect x="-90" y="-138" width="180" height="276" rx="90" fill="#0a0e1a"/>
+      <rect x="-74" y="-122" width="148" height="244" rx="74" fill="url(#body)"/>
+      <rect x="-50" y="-100" width="34" height="130" rx="17" fill="url(#shine)"/>
+    </g>
+    <!-- "×2": a small multiply sign and a bold 2, built from strokes so no font is involved. -->
+    <g id="mark" fill="none" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M-128 -10 L-56 62 M-56 -10 L-128 62"/>
+      <path d="M8 -52 C8 -112 112 -112 112 -52 C112 -6 52 26 8 84 L118 84"/>
+    </g>
+  </defs>
+
+  <rect id="bg" width="1024" height="1024" fill="#0a0e1a"/>
+  <circle cx="512" cy="560" r="440" fill="url(#glow)"/>
+  <g transform="translate(0 12)">
+    <ellipse cx="512" cy="770" rx="250" ry="46" fill="url(#shadow)"/>
+
+    <!-- back row of four, then the front row of three (front keylines cut into the back units) -->
+    <use href="#unit" transform="translate(308 545) scale(0.76)"/>
+    <use href="#unit" transform="translate(444 530) scale(0.76)"/>
+    <use href="#unit" transform="translate(580 530) scale(0.76)"/>
+    <use href="#unit" transform="translate(716 545) scale(0.76)"/>
+    <use href="#unit" transform="translate(376 652) scale(0.9)"/>
+    <use href="#unit" transform="translate(512 640) scale(0.9)"/>
+    <use href="#unit" transform="translate(648 652) scale(0.9)"/>
+  </g>
+
+  <!-- multiplier mark above the crowd, keyed out with a navy outline -->
+  <g transform="translate(516 318) scale(0.84)">
+    <use href="#mark" stroke="#0a0e1a" stroke-width="92"/>
+    <use href="#mark" stroke="#ffffff" stroke-width="54"/>
+  </g>
+</svg>
