@@ -65,7 +65,8 @@ export class SettingsPanel {
     // same rule as the shop: taps here must never reach the steer input on #app
     this.root.addEventListener('pointerdown', (e) => e.stopPropagation());
     this.root.addEventListener('keydown', (e) => {
-      if (e.key !== 'Escape') return;
+      // a held Escape that just opened this sheet (via the back handler) must not also close it
+      if (e.key !== 'Escape' || e.repeat) return;
       e.preventDefault();
       e.stopPropagation();
       this.close();

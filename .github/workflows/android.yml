@@ -68,8 +68,12 @@ jobs:
           test -x "$ANDROID_HOME/build-tools/$BUILD_TOOLS_VERSION/aapt2"
           echo "AAPT2=$ANDROID_HOME/build-tools/$BUILD_TOOLS_VERSION/aapt2" >> "$GITHUB_ENV"
 
+      # setup-gradle only writes its cache on the default branch by default; phase branches carry
+      # most pushes here, so let them save too (Actions scopes a branch's cache to that branch).
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5.0.2
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/heads/phase-') }}
 
       - name: Capacitor sync
         run: npx cap sync android
@@ -113,8 +117,9 @@ jobs:
         run: |
           apk=android/app/build/outputs/apk/debug/app-debug.apk
           badging="$("$AAPT2" dump badging "$apk")"
-          # Badging has no orientation field; read it from the compiled manifest instead.
-          raw="$("$AAPT2" dump xmltree --file AndroidManifest.xml "$apk" | grep -m1 'screenOrientation' | sed -E 's/.*=(\(type 0x[0-9a-fA-F]+\))?//' || true)"
+          # Badging has no orientation or app category field; read them from the compiled manifest.
+          tree="$("$AAPT2" dump xmltree --file AndroidManifest.xml "$apk")"
+          raw="$(grep -m1 'screenOrientation' <<< "$tree" | sed -E 's/.*=(\(type 0x[0-9a-fA-F]+\))?//' || true)"
           orientation="not set (${raw:-no screenOrientation attribute})"
           if [[ "$raw" =~ ^(0x[0-9a-fA-F]+|[0-9]+)$ ]]; then
             case "$((raw))" in
@@ -122,6 +127,12 @@ jobs:
               6) orientation=sensorLandscape ;; 7) orientation=sensorPortrait ;; 9) orientation=reversePortrait ;;
               12) orientation=userPortrait ;; *) orientation="other (screenOrientation=$raw)" ;;
             esac
+          fi
+          # Android 16+ keeps the portrait lock on large screens only for appCategory game (0).
+          rawcat="$(grep -m1 'appCategory' <<< "$tree" | sed -E 's/.*=(\(type 0x[0-9a-fA-F]+\))?//' || true)"
+          category="not set (${rawcat:-no appCategory attribute})"
+          if [[ "$rawcat" =~ ^(0x[0-9a-fA-F]+|[0-9]+)$ ]]; then
+            if [ "$((rawcat))" -eq 0 ]; then category=game; else category="other (appCategory=$rawcat)"; fi
           fi
           report="$RUNNER_TEMP/badging.md"
           {
@@ -131,6 +142,7 @@ jobs:
             grep -E '^(package|sdkVersion|minSdkVersion|targetSdkVersion|uses-permission|application-label|launchable-activity):' <<< "$badging" || true
             grep -E 'android\.hardware\.screen\.(portrait|landscape)' <<< "$badging" || true
             echo "orientation: $orientation"
+            echo "appCategory: $category"
             echo '```'
           } > "$report"
           cat "$report"

@@ -28,9 +28,9 @@ export interface AutoState {
   elapsed: number;
   windowTime: number;
   windowFrames: number;
-  /** Seconds of consecutive fast windows. */
+  /** Seconds of fast windows since the last slow window or tier step. */
   fastTime: number;
-  /** Seconds since the last step down (or since init). */
+  /** Seconds since the last step down (starts satisfied: init is not a step down). */
   sinceDown: number;
 }
 
@@ -46,11 +46,11 @@ const LOWER: Record<QualityTier, QualityTier> = { high: 'medium', medium: 'low',
 const HIGHER: Record<QualityTier, QualityTier> = { high: 'high', medium: 'high', low: 'medium' };
 
 /**
- * sinceDown starts at 0: the starting tier counts as a fresh decision, so auto
- * never climbs within UP_GUARD_SEC of being (re)started.
+ * sinceDown starts at UP_GUARD_SEC: the guard only holds off a climb after a
+ * real step down, so a start tier with headroom climbs after one fast hold.
  */
 export function initialAutoState(tier: QualityTier): AutoState {
-  return { tier, elapsed: 0, windowTime: 0, windowFrames: 0, fastTime: 0, sinceDown: 0 };
+  return { tier, elapsed: 0, windowTime: 0, windowFrames: 0, fastTime: 0, sinceDown: UP_GUARD_SEC };
 }
 
 /**
@@ -83,11 +83,8 @@ export function autoStep(s: AutoState, dtReal: number): QualityTier | null {
     return next;
   }
 
-  if (avg >= FAST_FRAME) {
-    // smooth enough to stay, not enough headroom to climb: the streak starts over
-    s.fastTime = 0;
-    return null;
-  }
+  // smooth enough to stay, not enough headroom to climb: neither counts nor breaks the streak
+  if (avg >= FAST_FRAME) return null;
 
   s.fastTime += span;
   if (s.fastTime < FAST_HOLD_SEC || s.sinceDown < UP_GUARD_SEC) return null;

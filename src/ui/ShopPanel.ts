@@ -75,7 +75,8 @@ export class ShopPanel {
     // keep shop taps out of the game's steer input (it listens on #app)
     this.root.addEventListener('pointerdown', (e) => e.stopPropagation());
     this.root.addEventListener('keydown', (e) => {
-      if (e.key !== 'Escape') return;
+      // only a fresh press closes: auto-repeat of a held Escape is ignored, as in settings
+      if (e.key !== 'Escape' || e.repeat) return;
       e.preventDefault();
       e.stopPropagation();
       this.close();

@@ -204,8 +204,9 @@ The web build runs unchanged inside a **Capacitor 8** WebView shell: `android/` 
 
 What the shell adds:
 
-- **Portrait, immersive fullscreen** — `MainActivity` locks portrait, hides the status and
-  navigation bars (a swipe from the edge shows them briefly over the game), draws edge to edge
+- **Portrait, immersive fullscreen** — `MainActivity` locks portrait (the manifest's
+  `appCategory="game"` keeps that lock on Android 16+ tablets and foldables), hides the status
+  and navigation bars (a swipe from the edge shows them briefly over the game), draws edge to edge
   into the display cutout and keeps the screen on while the game is in front. Every window
   background is navy `#0a0e1a`, so there is no white flash, and Android 12+ gets a navy splash
   with the launcher icon. The HUD clears notches and the gesture bar via `env(safe-area-inset-*)`.
@@ -273,14 +274,16 @@ Needs **JDK 21** and the **Android SDK with platform 36** (Android Studio instal
 
 ```bash
 npm run cap:sync      # web build, copy it into android/, sync the plugins
-npm run android:apk   # cap:sync, then ./gradlew assembleDebug
+npm run android:apk   # cap:sync, then ./gradlew assembleDebug (macOS / Linux)
 ```
 
-The APK lands in `android/app/build/outputs/apk/debug/app-debug.apk`. `android:apk` calls
-`./gradlew`, so run it from Git Bash or another POSIX shell (from cmd: `npm run cap:sync`, then
-`cd android && gradlew.bat assembleDebug`). `npx cap open android` opens the project in Android
-Studio. Re-sync after every web change: the copied bundle in `android/app/src/main/assets/public`
-is gitignored and only `cap sync` refreshes it.
+The APK lands in `android/app/build/outputs/apk/debug/app-debug.apk`. On Windows `android:apk`
+fails from every shell, Git Bash included: npm runs scripts through cmd.exe, which cannot run
+`./gradlew`. Run the two halves yourself instead: `npm run cap:sync`, then `cd android` and
+`gradlew.bat assembleDebug` (in PowerShell `.\gradlew.bat assembleDebug`, in Git Bash
+`./gradlew assembleDebug`). `npx cap open android` opens the project in Android Studio.
+Re-sync after every web change: the copied bundle in `android/app/src/main/assets/public` is
+gitignored and only `cap sync` refreshes it.
 
 ### Before the first Play upload: change the app id
 
