@@ -1,7 +1,10 @@
 import * as THREE from 'three';
 import type { GameConfig, GameState, LevelDefinition, Segment, SkinDef } from '../data/types';
 import { loadConfig } from '../data/ConfigLoader';
-import { FetchLevelRepository, wrapsFor, type ILevelRepository } from '../data/LevelRepository';
+import { FetchLevelRepository, validateLevel, wrapsFor, type ILevelRepository } from '../data/LevelRepository';
+import {
+  dailyDifficulty, dailyKey, generateDaily, previousDayKey, type ChunkLibrary,
+} from '../data/LevelGenerator';
 import { clamp } from '../util/MathUtil';
 import { Track } from '../world/Track';
 import { CrowdController } from '../crowd/CrowdController';
@@ -10,7 +13,7 @@ import { ParticlePool } from '../combat/ParticlePool';
 import { InputSystem } from '../systems/InputSystem';
 import { QualityManager } from '../systems/QualityManager';
 import type { QualityTier } from '../systems/QualityPolicy';
-import { HUD, type OverlayOpts } from '../ui/HUD';
+import { HUD, type DailyCardOpts, type DailyRewardInfo, type OverlayOpts } from '../ui/HUD';
 import { ShopPanel } from '../ui/ShopPanel';
 import { SettingsPanel } from '../ui/SettingsPanel';
 import { SaveService } from '../services/SaveService';
@@ -28,6 +31,7 @@ import { ObjectiveNode } from '../entities/ObjectiveNode';
 import { Boss } from '../entities/Boss';
 import { Finish } from '../entities/Finish';
 import { Pickup } from '../entities/Pickup';
+import { Blade } from '../entities/Blade';
 
 const BASE_FOV = 56;
 const CAM_BACK = 8.5;
@@ -42,9 +46,22 @@ const DEFAULT_TRACER_COLOR = 0xfff1a8;
 // climbs only if the frame rate shows it can.
 const AUTO_START_TIER: QualityTier = isNative ? 'medium' : 'high';
 
+// dailyDifficulty's numbering: 1 = Monday ... 7 = Sunday
+const WEEKDAYS: readonly string[] = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'];
+// how often an idle menu checks whether its daily card's day has ended
+const MENU_DAY_CHECK_SEC = 30;
+
 function hexColor(css: string, fallback: number): number {
   return /^#[0-9a-f]{6}$/i.test(css) ? parseInt(css.slice(1), 16) : fallback;
 }
+
+/** A coin amount from config: a missing or broken value pays nothing rather than NaN-ing the balance. */
+function coinsOf(v: number): number {
+  return Number.isFinite(v) && v > 0 ? Math.floor(v) : 0;
+}
+
+/** Campaign: the saved level ladder. Daily: today's generated level, off the ladder. */
+type RunMode = 'campaign' | 'daily';
 
 type TargetKind = 'barricade' | 'enemy' | 'objective' | 'boss' | 'gate';
 interface Target {
@@ -69,8 +86,23 @@ export class GameManager {
   private sun: THREE.DirectionalLight;
 
   private cfg!: GameConfig;
+  /** What the track is built from: the campaign level, or a daily run's generated one. */
   private level!: LevelDefinition;
+  /** The saved progression level, kept while a daily run borrows the track so leaving it never refetches. */
+  private campaignLevel!: LevelDefinition;
+  private mode: RunMode = 'campaign';
+  /** Endless-mode loops over the authored list; always 0 for a daily. */
+  private wraps = 0;
   private runSpeed = 0;
+  /** null: chunks.json failed to load or can't build a level, so the menu offers no daily. */
+  private dailyLib: ChunkLibrary | null = null;
+  /** The key the daily run was generated for, fixed at the tap so a run past midnight keeps its day. */
+  private dailyRunKey = '';
+  /** The daily clear's payout, kept so the ceremony can be re-shown (back from the shop) without paying twice. */
+  private dailyReward: DailyRewardInfo | null = null;
+  /** The local day the menu's daily card was built for ('' until the first menu): past midnight it is stale. */
+  private menuDailyKey = '';
+  private menuDayCheckT = MENU_DAY_CHECK_SEC;
 
   private save = new SaveService();
   private audio = new AudioService();
@@ -98,12 +130,20 @@ export class GameManager {
   private pickups: Pickup[] = [];
   /** Parallel to `pickups`: the crowd is past this one, collected or missed. */
   private pickupPassed: boolean[] = [];
+  private blades: Blade[] = [];
   private boss: Boss | null = null;
   private finish: Finish | null = null;
 
   private state: GameState = 'MENU';
   private resumeState: GameState = 'PLAYING';
   private time = 0;
+  /**
+   * Simulated seconds since startRun: the clock every moving prop's sway runs
+   * on. Advances only inside simulate(), by its time-scaled dt, so it freezes
+   * with the world (pause, ad, LOSE) and runs on through a revive.
+   */
+  private runTime = 0;
+  private bladeLosses = 0;
   private shake = 0;
   private fovPunch = 0;
   private timeScale = 1;
@@ -210,8 +250,10 @@ export class GameManager {
     const base = import.meta.env.BASE_URL;
     this.cfg = await loadConfig(base);
     const levels = new FetchLevelRepository(base, this.cfg);
+    const dailyLib = this.loadDailyLibrary(base); // never rejects, so it can't fail the boot
     await levels.init();
     this.levels = levels; // assigned once count is readable
+    this.dailyLib = await dailyLib;
 
     const sdk = new AdServiceStub(this.cfg.ads.stubLatencyMs);
     this.ads = new AdGate(sdk, this.cfg.ads, {
@@ -291,13 +333,132 @@ export class GameManager {
 
   private async loadLevel(n: number): Promise<void> {
     // validated + cached by the repository: shared, so never mutated here
-    this.level = await this.levels.load(n);
-    this.runSpeed = this.level.forwardSpeed + this.cfg.meta.wrapSpeedStep * wrapsFor(n, this.levels.count);
+    this.campaignLevel = await this.levels.load(n);
+    this.useLevel(this.campaignLevel, 'campaign', wrapsFor(n, this.levels.count));
+  }
+
+  /** Puts `level` on the track for the next run. Synchronous: a fetch failure can't leave it half-built. */
+  private useLevel(level: LevelDefinition, mode: RunMode, wraps: number): void {
+    this.level = level;
+    this.mode = mode;
+    this.wraps = wraps;
+    this.runSpeed = level.forwardSpeed + this.cfg.meta.wrapSpeedStep * wraps;
     if (this.track) { this.scene.remove(this.track.group); this.track.dispose(); }
-    this.track = new Track(this.cfg, this.level.length);
+    this.track = new Track(this.cfg, level.length);
     this.scene.add(this.track.group);
     this.buildLevel();
-    this.hud.setLevel(this.save.get().currentLevel);
+    if (mode === 'daily') this.hud.setLevelText('DAILY');
+    else this.hud.setLevel(this.save.get().currentLevel);
+  }
+
+  /** Back from a daily run to the saved campaign level (already loaded, so nothing to fetch). */
+  private leaveDaily(): void {
+    this.useLevel(this.campaignLevel, 'campaign', wrapsFor(this.save.get().currentLevel, this.levels.count));
+  }
+
+  // ---------------------------------------------------------------- daily challenge
+  /**
+   * `levels/chunks.json`, or null when it is missing, malformed or can't build
+   * today's level: the menu then simply has no daily card. Never rejects.
+   */
+  private async loadDailyLibrary(base: string): Promise<ChunkLibrary | null> {
+    try {
+      const url = `${base}levels/chunks.json`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`HTTP ${res.status} loading ${url}`);
+      const raw: unknown = await res.json();
+      if (!raw || typeof raw !== 'object' || !Array.isArray((raw as { chunks?: unknown }).chunks)) {
+        throw new Error('expected {"chunks": [...]}');
+      }
+      const lib = raw as ChunkLibrary;
+      // a library that can't build a level would only fail on the tap: find out now
+      this.generateDailyLevel(dailyKey(new Date()), lib);
+      return lib;
+    } catch (err) {
+      console.warn('Daily challenge unavailable (chunks.json):', err);
+      return null;
+    }
+  }
+
+  /** The day's level, held to the same validation as an authored file. */
+  private generateDailyLevel(key: string, lib: ChunkLibrary): LevelDefinition {
+    return validateLevel(generateDaily(key, lib, this.cfg), `daily ${key}`, this.cfg);
+  }
+
+  /** Menu card: PLAY DAILY. Generated on the tap, so the level belongs to the day the run started. */
+  private playDaily(): void {
+    if (this.uiLocked() || !this.dailyLib) return;
+    this.audio.unlock();
+    const key = dailyKey(new Date());
+    let level: LevelDefinition;
+    try {
+      level = this.generateDailyLevel(key, this.dailyLib);
+    } catch (err) {
+      console.error(`Daily ${key} failed to generate:`, err);
+      this.dailyLib = null; // no card that can only fail again
+      this.audio.play('bad');
+      this.showMenu();
+      return;
+    }
+    this.dailyRunKey = key;
+    this.useLevel(level, 'daily', 0); // no endless scaling: every player gets the same day
+    this.startRun();
+  }
+
+  /** Coins a first daily clear pays on top of the level's own, at clear streak `streak`. */
+  private dailyBonus(streak: number): number {
+    const d = this.cfg.daily;
+    return coinsOf(d.bonusCoins) + coinsOf(d.streakBonus) * Math.min(Math.max(0, streak), coinsOf(d.streakCap));
+  }
+
+  /** The menu's DAILY CHALLENGE card for today's local date; undefined hides it. */
+  private dailyCard(): DailyCardOpts | undefined {
+    if (!this.dailyLib) return undefined;
+    const key = dailyKey(new Date());
+    const d = this.save.get().daily;
+    // on or before the last clear: a clock set back finds that day already paid
+    const cleared = d.lastClearKey !== '' && key <= d.lastClearKey;
+    // a streak lives while its last clear is today or yesterday; past that the next clear restarts it
+    const streak = cleared || d.lastClearKey === previousDayKey(key) ? d.streak : 0;
+    const difficulty = dailyDifficulty(key);
+    return {
+      weekday: WEEKDAYS[difficulty - 1] ?? '',
+      difficulty,
+      streak,
+      best: d.key === key ? d.best : 0,
+      cleared,
+      bonus: cleared ? 0 : this.dailyBonus(streak + 1),
+      onPlay: () => this.playDaily(),
+    };
+  }
+
+  /** A daily win: first clear of its day banks the bonus and extends the streak. */
+  private payDailyClear(): DailyRewardInfo {
+    const key = this.dailyRunKey;
+    const { firstClear, streak } = this.save.recordDailyClear(key, previousDayKey(key), this.peakCount);
+    const bonus = firstClear ? this.dailyBonus(streak) : 0; // a repeat clear pays the level's coins only
+    if (bonus > 0) this.save.addCoins(bonus);
+    return { firstClear, streak, bonus };
+  }
+
+  /**
+   * Daily reward screen → CONTINUE. The clear still counts toward the
+   * interstitial cadence, then it is back to the campaign menu: a daily never
+   * advances (or even reads) currentLevel.
+   */
+  private async finishDaily(): Promise<void> {
+    if (this.uiLocked()) return;
+    this.transitioning = true;
+    this.hideOverlay();
+    this.refreshGear();
+    try {
+      await this.ads.onLevelComplete(); // never rejects
+    } finally {
+      this.transitioning = false;
+    }
+    this.runGen += 1;
+    this.backToStartLine();
+    this.showMenu();
   }
 
   /** NEXT LEVEL, or RETRY after the next level failed to load (`retry`: this clear was already counted). */
@@ -351,6 +512,18 @@ export class GameManager {
   private buildLevel(): void {
     this.disposeEntities();
     for (const seg of this.level.segments) this.spawnSegment(seg);
+    // a phased sway does not start at its authored x: pose the fresh world at
+    // clock 0 so the menu shows what the first step will
+    this.trackMovers(0);
+  }
+
+  /** Every prop to where its sway puts it at run time `t` (a no-op for the static ones). */
+  private trackMovers(t: number): void {
+    // dead and passed props keep sweeping on screen; no rule reads their x
+    for (const b of this.barricades) b.track(t);
+    for (const e of this.enemies) e.track(t);
+    for (const p of this.pickups) p.track(t);
+    for (const bl of this.blades) bl.track(t);
   }
 
   /**
@@ -374,7 +547,7 @@ export class GameManager {
   }
 
   private spawnSegment(raw: Segment): void {
-    const wraps = wrapsFor(this.save.get().currentLevel, this.levels.count);
+    const wraps = this.wraps; // the level's own: currentLevel's for the campaign, 0 for a daily
     const seg = wraps > 0 ? this.scaleSegment(raw, wraps) : raw;
     switch (seg.type) {
       case 'gate_pair': {
@@ -417,6 +590,13 @@ export class GameManager {
         this.pickupPassed.push(false);
         break;
       }
+      case 'blade': {
+        // never a bullet target, so it stays out of the candidates bookkeeping
+        const bl = new Blade(seg, this.cfg);
+        this.scene.add(bl.group);
+        this.blades.push(bl);
+        break;
+      }
     }
   }
 
@@ -426,11 +606,12 @@ export class GameManager {
     this.enemies.forEach((e) => e.dispose(this.scene));
     this.objectives.forEach((o) => o.dispose(this.scene));
     this.pickups.forEach((p) => p.dispose(this.scene));
+    this.blades.forEach((bl) => bl.dispose(this.scene));
     this.boss?.dispose(this.scene);
     this.finish?.dispose(this.scene);
     this.gates = []; this.barricades = []; this.enemies = [];
     this.objectives = []; this.boss = null; this.finish = null;
-    this.pickups = []; this.pickupPassed = [];
+    this.pickups = []; this.pickupPassed = []; this.blades = [];
     // pooled slots hold refs to the entities just disposed — drop them here,
     // not per frame, so the combat scan stays allocation-free
     this.candidates.length = 0; this.candidateCount = 0;
@@ -439,6 +620,8 @@ export class GameManager {
   // ---------------------------------------------------------------- run control
   private showMenu(): void {
     this.state = 'MENU';
+    this.menuDailyKey = dailyKey(new Date());
+    this.menuDayCheckT = MENU_DAY_CHECK_SEC;
     this.setMusic(0);
     this.hud.setHint(false);
     this.hud.bossBar(false);
@@ -461,6 +644,7 @@ export class GameManager {
       },
       btn3Text: offerBonus ? `+${bonus} START CROWD (AD)` : undefined,
       onBtn3: offerBonus ? () => { void this.bonusStart(); } : undefined,
+      daily: this.dailyCard(),
     });
     this.refreshGear();
   }
@@ -489,6 +673,8 @@ export class GameManager {
     this.chipCueT = 0;
     this.lanePreviewCount = -1;
     this.pickupsCollected = 0;
+    this.runTime = 0;
+    this.bladeLosses = 0;
     this.state = 'PLAYING';
     this.setMusic(1);
     this.hud.setHint(true);
@@ -607,7 +793,17 @@ export class GameManager {
   private quitToMenu(): void {
     this.paused = false;
     this.runGen += 1;
-    this.recordPeak(); // a quit still counts toward the best crowd
+    this.recordRunEnd(); // a quit still counts toward the best crowd
+    this.backToStartLine();
+    this.showMenu();
+  }
+
+  /**
+   * Back to the start line, as at boot: the camera eases home behind the menu
+   * and a bonus-crowd popup lands on the crowd's real spawn point. A daily run
+   * hands the track back to the campaign level here.
+   */
+  private backToStartLine(): void {
     this.bullets.clear();
     this.enemyBullets.clear();
     this.hud.setDanger(false);
@@ -615,13 +811,11 @@ export class GameManager {
     this.bossBarShown = false;
     this.timeScale = 1;
     this.targetTimeScale = 1;
-    // back to the start line, as at boot: the camera eases home behind the menu
-    // and a bonus-crowd popup lands on the crowd's real spawn point
-    this.buildLevel();
+    if (this.mode === 'daily') this.leaveDaily();
+    else this.buildLevel();
     this.crowd.reset(0);
     this.crowd.update(0, this.time);
     this.hud.setProgress(0);
-    this.showMenu();
   }
 
   /** Settings → RESET PROGRESS (already confirmed by the panel's second tap). */
@@ -666,6 +860,19 @@ export class GameManager {
     // ad or fetch settled in the background): come back to the pause sheet anyway.
     this.pauseIfLive();
     if (!this.adOpen) this.audio.resume(); // an open ad resumes audio itself, on close
+    this.refreshStaleMenu(); // backgrounded on the menu overnight: today's card, not yesterday's
+  }
+
+  /**
+   * Rebuilds the menu when its daily card belongs to a day that has ended, so it
+   * never shows yesterday as CLEARED while PLAY DAILY would start today. Only
+   * the bare menu: never under the shop, settings or an ad (whose continuation
+   * checks the overlay it started from), and never before boot showed one.
+   */
+  private refreshStaleMenu(): void {
+    if (this.menuDailyKey === '' || this.state !== 'MENU' || !this.dailyLib) return;
+    if (this.uiLocked() || this.adOpen || this.shopOpen || this.settings.isOpen) return;
+    if (dailyKey(new Date()) !== this.menuDailyKey) this.showMenu();
   }
 
   /**
@@ -736,6 +943,13 @@ export class GameManager {
       // read as headroom. Unclamped, so a hitch is seen as one and skipped.
       this.quality.sample(frameSec);
       this.simulate(dt);
+    } else if (this.state === 'MENU') {
+      // a menu left open across midnight; throttled, since the check builds a Date
+      this.menuDayCheckT -= dtReal;
+      if (this.menuDayCheckT <= 0) {
+        this.menuDayCheckT = MENU_DAY_CHECK_SEC;
+        this.refreshStaleMenu();
+      }
     }
     // Unconditional: death pops and the count roll-up must finish playing while
     // an overlay is up, not freeze mid-air.
@@ -747,6 +961,9 @@ export class GameManager {
   }
 
   private simulate(dt: number): void {
+    // first, so during this step the crowd stands at z = runSpeed * runTime
+    // (until the standoff), the same clock the balance sim moves props by
+    this.runTime += dt;
     this.chipCueT = Math.max(0, this.chipCueT - dt);
 
     // INPUT → steer
@@ -770,6 +987,8 @@ export class GameManager {
     this.crowd.update(dt, this.time);
     this.peakCount = Math.max(this.peakCount, this.crowd.count);
 
+    // MOTION: every x that combat and collision read below is this step's x
+    this.trackMovers(this.runTime);
     // COMBAT
     this.combat(dt);
     // GATES
@@ -1061,6 +1280,28 @@ export class GameManager {
       }
     }
 
+    // Blades: one cut on the crossing step, sized by the share of the formation
+    // the saw overlaps where it stands now. Indestructible, so dodging is the
+    // only answer; a clean dodge plays nothing.
+    for (const bl of this.blades) {
+      if (bl.passed || cz < bl.z) continue;
+      bl.passed = true;
+      const h = this.crowdHalf(); // not the loop-top value: a ram this step may have shrunk the formation
+      const bh = bl.width / 2;
+      const overlap = Math.max(0, Math.min(cx + h, bl.x + bh) - Math.max(cx - h, bl.x - bh));
+      const frac = overlap / (2 * h);
+      if (frac <= 0) continue;
+      const lost = this.crowd.kill(Math.ceil(this.crowd.count * bl.kill * frac));
+      if (lost <= 0) continue;
+      this.bladeLosses += lost;
+      bl.flashHit(lost);
+      this.popupWorld(`-${lost}`, '#ff5a52', cx, 1.4, cz);
+      this.audio.play('bad');
+      this.haptics.pulse('warn');
+      this.shake = Math.max(this.shake, 0.2);
+      this.hud.setCount(this.crowd.count);
+    }
+
     // Pickups: resolved once the crowd reaches their z, either way. A miss is
     // latched without collect() so it scrolls past intact instead of popping.
     for (let i = 0; i < this.pickups.length; i++) {
@@ -1125,6 +1366,7 @@ export class GameManager {
     for (const e of this.enemies) e.update(dt, this.time, cam);
     for (const o of this.objectives) o.update(dt, cam);
     for (const p of this.pickups) p.update(dt, this.time, cam);
+    for (const bl of this.blades) bl.update(dt, this.time, cam, this.crowd.centroid.z);
     if (this.finish) this.finish.update(dt, cam);
     if (this.boss) {
       const frac = this.boss.update(dt, this.time, cam, this.crowd.centroid.x, this.crowdHalf(), this.state === 'BOSS');
@@ -1200,12 +1442,14 @@ export class GameManager {
     const coinPerUnit = econ.coinPerUnit + this.save.get().upgrades.income;
     let coins = Math.round(surviving * coinPerUnit * Math.max(1, mult));
     this.save.addCoins(coins);
+    const isNewBest = this.recordRunEnd();
+    // the daily bonus is banked beside the level's coins, never doubled with them
+    this.dailyReward = this.mode === 'daily' ? this.payDailyClear() : null;
     this.hud.setCoins(this.save.get().coins);
     this.audio.play('cheer');
     this.haptics.pulse('success');
     this.setMusic(0);
     this.hud.setDanger(false);
-    const isNewBest = this.recordPeak();
     this.rewardDoubled = false;
 
     this.state = 'REWARD';
@@ -1222,17 +1466,29 @@ export class GameManager {
     return true;
   }
 
+  /** Every run end (win, loss, quit): the all-time best, and a daily run's best for its day. */
+  private recordRunEnd(): boolean {
+    if (this.mode === 'daily') this.save.recordDailyResult(this.dailyRunKey, this.peakCount);
+    return this.recordPeak();
+  }
+
   private showReward(surviving: number, mult: number, coins: number, isNewBest: boolean): void {
     this.overlayGen += 1; // showRewardCeremony is an overlay show too
+    const daily = this.mode === 'daily';
     this.hud.showRewardCeremony({
       survivors: surviving,
       mult,
       coins,
       best: this.save.get().bestPeak,
       isNewBest,
+      title: daily ? 'DAILY CLEAR!' : undefined,
+      nextText: daily ? 'CONTINUE' : undefined,
+      daily: daily ? this.dailyReward : null,
       onNext: () => {
         if (this.uiLocked()) return;
-        this.audio.play('click'); void this.advanceLevel();
+        this.audio.play('click');
+        if (daily) void this.finishDaily(); // back to the menu: a daily is off the level ladder
+        else void this.advanceLevel();
       },
       onDouble: () => { void this.doubleCoins(coins); },
       onShop: () => {
@@ -1284,33 +1540,41 @@ export class GameManager {
     this.setMusic(0);
     this.hud.bossBar(false);
     this.hud.setDanger(false); // simulate() stops here, so clear the vignette by hand
-    this.recordPeak();
+    this.recordRunEnd();
     this.showLoseOverlay();
     this.refreshGear();
   }
 
   private showLoseOverlay(): void {
     const canRevive = this.ads.canOfferRewarded(); // no fill: no REVIVE button to fail on
+    const daily = this.mode === 'daily';
     this.showOverlay({
       title: 'OUT OF CROWD',
-      body: 'Your swarm was wiped out.',
-      btnText: 'RETRY',
+      body: daily ? "Your swarm was wiped out. Today's challenge is still open." : 'Your swarm was wiped out.',
+      btnText: 'RETRY', // a daily retries its own day's level: startRun rebuilds this.level
       onBtn: () => {
         if (this.uiLocked()) return;
         this.audio.play('click'); this.startRun();
       },
       btn2Text: canRevive ? 'REVIVE (AD)' : undefined,
       onBtn2: canRevive ? () => { void this.reviveFromAd(); } : undefined,
-      btn3Text: '🛒 SHOP',
-      onBtn3: () => {
-        if (this.uiLocked()) return;
-        this.audio.play('click');
-        this.hideOverlay();
-        this.openShop(() => {
-          this.hud.setCoins(this.save.get().coins);
-          this.showLoseOverlay();
-        });
-      },
+      // A daily lost has to be able to walk away without replaying it; the shop
+      // is one tap further, on the menu.
+      btn3Text: daily ? 'MENU' : '🛒 SHOP',
+      onBtn3: daily
+        ? () => {
+          if (this.uiLocked()) return;
+          this.audio.play('click'); this.quitToMenu();
+        }
+        : () => {
+          if (this.uiLocked()) return;
+          this.audio.play('click');
+          this.hideOverlay();
+          this.openShop(() => {
+            this.hud.setCoins(this.save.get().coins);
+            this.showLoseOverlay();
+          });
+        },
     });
   }
 
@@ -1341,6 +1605,8 @@ export class GameManager {
       bossHp: this.boss ? Math.ceil(this.boss.hp) : null,
       bossAttack: this.boss ? this.boss.currentAttack : null,
       pickups: this.pickupsCollected,
+      runTime: +this.runTime.toFixed(2),
+      bladeLosses: this.bladeLosses,
       runSpeed: +this.runSpeed.toFixed(2),
       coins: this.save.get().coins,
       peak: this.peakCount,
@@ -1353,6 +1619,10 @@ export class GameManager {
       settings: { ...this.save.get().settings },
       removeAds: this.save.get().removeAds,
       levelCount: this.levels ? this.levels.count : null,
+      mode: this.mode,
+      dailyRunKey: this.mode === 'daily' ? this.dailyRunKey : null,
+      dailyAvailable: this.dailyLib !== null,
+      daily: { ...this.save.get().daily },
       platform,
       tier: this.quality.tier,
       graphics: this.quality.mode,

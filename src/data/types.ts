@@ -3,6 +3,10 @@
 // Everything a designer can touch lives as plain JSON matching these types.
 // ---------------------------------------------------------------------------
 
+import type { MotionDef } from '../core/Motion';
+
+export type { MotionDef };
+
 export interface GameConfig {
   track: { minX: number; maxX: number; forwardSpeed: number; width: number };
   crowd: {
@@ -45,6 +49,10 @@ export interface GameConfig {
     // slam: a shorter telegraph that locks onto the crowd and hits harder
     slamTelegraphScale: number;
     slamHitScale: number;
+    // crossfire: two danger planes either side of one safe gap the crowd must find
+    crossfireGapHalf: number;
+    crossfireTelegraphScale: number;
+    crossfireHitScale: number;
   };
   gates: { damagePerTick: number; mulCap: number; addCap: number; decayFloor: number };
   barricade: { ramFactor: number };
@@ -67,6 +75,13 @@ export interface GameConfig {
     stubLatencyMs: number;
     /** Units the bonus_crowd rewarded ad adds at run start. */
     bonusCrowd: number;
+  };
+  /** Daily challenge payout, first clear of the day only. */
+  daily: {
+    bonusCoins: number;
+    /** Coins per day of the clear streak, counted up to streakCap days. */
+    streakBonus: number;
+    streakCap: number;
   };
 }
 
@@ -96,7 +111,8 @@ export type SegmentType =
   | 'boss'
   | 'finish'
   | 'coin_pickup'
-  | 'crowd_pickup';
+  | 'crowd_pickup'
+  | 'blade';
 
 export interface Segment {
   z: number;
@@ -106,10 +122,15 @@ export interface Segment {
   right?: GateSide;
   tickable?: boolean;
   tickPerHit?: number;
-  // barricade / enemy / objective / boss
+  // barricade / enemy / objective / boss / blade
   x?: number;
   hp?: number;
+  /** barricade: wall width; blade: saw length along X */
   width?: number;
+  /** blade: share of the overlapped crowd it cuts, (0, 1] */
+  kill?: number;
+  /** Side-to-side sway. barricade, enemy_crowd, coin_pickup, crowd_pickup and blade only. */
+  motion?: MotionDef;
   count?: number;
   fireRate?: number;
   reward?: number;
@@ -149,6 +170,20 @@ export interface SaveData {
   equippedSkin: string;
   /** Remove Ads purchase: suppresses interstitials (rewarded ads stay opt-in). */
   removeAds: boolean;
+  daily: DailySave;
+}
+
+/** Daily challenge progress. Keys are local calendar dates, 'YYYY-MM-DD'. */
+export interface DailySave {
+  /** The day `best` and `cleared` refer to; '' before the first daily run. */
+  key: string;
+  /** Peak crowd reached on that day's challenge. */
+  best: number;
+  /** That day pays no first-clear bonus: it is lastClearKey or earlier. */
+  cleared: boolean;
+  /** Consecutive days cleared, ending on lastClearKey. */
+  streak: number;
+  lastClearKey: string;
 }
 
 export type GameState =

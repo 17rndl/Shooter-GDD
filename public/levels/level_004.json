@@ -1,0 +1,48 @@
+{
+  "id": 4,
+  "length": 330,
+  "forwardSpeed": 9.0,
+  "segments": [
+    { "z": 24, "type": "gate_pair",
+      "left":  { "op": "mul", "value": 3 },
+      "right": { "op": "add", "value": 24 } },
+
+    { "z": 30, "type": "coin_pickup", "x": -1.8, "value": 15 },
+    { "z": 37, "type": "coin_pickup", "x": -1.8, "value": 15 },
+    { "z": 44, "type": "coin_pickup", "x": -1.8, "value": 15 },
+    { "z": 50, "type": "barricade", "x": -1.0, "hp": 120, "width": 2.2 },
+    { "z": 64, "type": "blade", "x": 1.4, "width": 1.8, "kill": 0.4 },
+
+    { "z": 90, "type": "gate_pair",
+      "left":  { "op": "sub", "value": 8 },
+      "right": { "op": "mul", "value": 2 } },
+
+    { "z": 114, "type": "enemy_crowd", "x": 1.3, "count": 34, "fireRate": 4.5 },
+    { "z": 122, "type": "crowd_pickup", "x": -1.6, "value": 25 },
+
+    { "z": 142, "type": "objective_node", "x": -1.2, "hp": 280, "reward": 40 },
+
+    { "z": 170, "type": "blade", "x": 0.0, "width": 1.6, "kill": 0.4,
+      "motion": { "amp": 1.3, "period": 4.2, "phase": 0.25 } },
+
+    { "z": 196, "type": "barricade", "x": -1.5, "hp": 280, "width": 1.8 },
+    { "z": 200, "type": "gate_pair",
+      "left":  { "op": "div", "value": 3 },
+      "right": { "op": "add", "value": 30 },
+      "tickable": true, "tickPerHit": 1 },
+
+    { "z": 226, "type": "enemy_crowd", "x": -1.6, "count": 42, "fireRate": 6.0 },
+    { "z": 226, "type": "enemy_crowd", "x": 1.6, "count": 42, "fireRate": 6.0 },
+    { "z": 236, "type": "crowd_pickup", "x": 0.0, "value": 55 },
+
+    { "z": 252, "type": "barricade", "x": 0.0, "hp": 640, "width": 2.6 },
+
+    { "z": 274, "type": "gate_pair",
+      "left":  { "op": "mul", "value": 2 },
+      "right": { "op": "add", "value": 45 } },
+
+    { "z": 300, "type": "boss", "hp": 11900, "attacks": ["sweep_fire", "slam"] },
+
+    { "z": 318, "type": "finish", "multiplierLanes": [2, 3, 5] }
+  ]
+}

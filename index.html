@@ -144,9 +144,15 @@
       }
 
       /* center overlay screens (menu / win / lose) */
+      /* `safe center` + overflow: content taller than a short screen scrolls
+         from its top instead of clipping both ends (plain `center` is the
+         fallback where `safe` is unknown); the scroll container resets body's
+         touch-action:none for its subtree, and InputSystem never steers from here */
       #overlay {
         position: absolute; inset: 0; display: none;
-        flex-direction: column; align-items: center; justify-content: center;
+        flex-direction: column; align-items: center;
+        justify-content: center; justify-content: safe center;
+        overflow-y: auto; overscroll-behavior: contain; touch-action: pan-y;
         gap: 18px; text-align: center;
         padding: max(24px, var(--inset-t)) max(24px, var(--inset-r)) max(24px, var(--inset-b)) max(24px, var(--inset-l));
         background: rgba(6,10,22,0.72); backdrop-filter: blur(3px);
@@ -212,6 +218,65 @@
         box-shadow: 0 4px 12px rgba(255,210,74,0.35);
       }
       .best-line { margin-top: 8px; font-size: 13px; font-weight: 700; opacity: 0.6; }
+      /* daily clear payout: lands just after the coin roll-up (HUD COIN_COUNT_DURATION 1s) */
+      .daily-bonus {
+        margin-top: 6px; font-size: 18px; font-weight: 900; color: var(--gold);
+        text-shadow: 0 2px 8px rgba(255,210,74,0.35);
+        animation: bonusIn 0.35s ease-out 1s both;
+      }
+      .daily-streak-line {
+        margin-top: 2px; font-size: 13px; font-weight: 800; color: rgba(255,255,255,0.85);
+        animation: bonusIn 0.35s ease-out 1.1s both;
+      }
+      @keyframes bonusIn {
+        0%   { opacity: 0; transform: scale(0.7); }
+        70%  { opacity: 1; transform: scale(1.08); }
+        100% { opacity: 1; transform: scale(1); }
+      }
+
+      /* ---------- daily challenge card (menu, inside #overlay-extra) ---------- */
+      /* stretched, not shrink-wrapped: the card's max-width needs a definite box
+         (text-align still centers the reward lines that share this area) */
+      #overlay-extra { align-self: stretch; }
+      /* 300px, never wider than the overlay's content box: 272px at a 320px screen */
+      .daily-card {
+        width: 300px; max-width: 100%; margin: 0 auto;
+        display: flex; flex-direction: column; gap: 9px; padding: 12px 14px;
+        text-align: left;
+        background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+        box-shadow: 0 8px 20px rgba(0,0,0,0.3);
+      }
+      .daily-card.cleared { border-color: rgba(92,224,106,0.5); }
+      .daily-head, .daily-row { display: flex; align-items: center; gap: 8px; }
+      .daily-head { justify-content: space-between; }
+      .daily-title { font-size: 13px; font-weight: 900; letter-spacing: 0.8px; color: var(--gold); }
+      .daily-tick {
+        flex: none; padding: 2px 8px; border-radius: 999px;
+        font-size: 11px; font-weight: 900; letter-spacing: 0.4px; color: var(--green);
+        background: rgba(92,224,106,0.14); border: 1px solid rgba(92,224,106,0.6);
+      }
+      .daily-row {
+        flex-wrap: wrap; row-gap: 6px;
+        font-size: 13px; font-weight: 800; font-variant-numeric: tabular-nums;
+      }
+      .daily-day { letter-spacing: 0.6px; }
+      .daily-pips { display: inline-flex; gap: 3px; }
+      .daily-pips i { width: 8px; height: 8px; border-radius: 50%; background: rgba(255,255,255,0.16); }
+      /* the week ramps green → gold → orange → red, Monday to Sunday */
+      .daily-pips i.on { background: var(--green); }
+      .daily-pips i.on:nth-child(n+3) { background: var(--gold); }
+      .daily-pips i.on:nth-child(n+5) { background: #ff8a3d; }
+      .daily-pips i.on:nth-child(7) { background: var(--red); }
+      .daily-stats { margin-left: auto; display: inline-flex; gap: 10px; white-space: nowrap; }
+      .daily-stats .dim { opacity: 0.5; }
+      .daily-card .btn { width: 100%; }
+      .daily-bonus-tag { margin-left: 8px; font-size: 13px; font-weight: 900; color: #6b4a00; }
+      /* the menu with the card is the tallest overlay: tighten it where 568px is all there is */
+      @media (max-height: 640px) {
+        #overlay.with-card { gap: 12px; }
+        #overlay.with-card h1 { font-size: 28px; }
+        #overlay.with-card p { font-size: 14px; }
+      }
 
       #hint {
         /* keeps its 66px gap above #crowd-count when an inset lifts the count */
@@ -376,6 +441,7 @@
       @media (prefers-reduced-motion: reduce) {
         #crowd-count.danger { animation: none; opacity: 1; text-shadow: 0 3px 0 rgba(0,0,0,0.35), 0 0 18px rgba(255,90,82,0.8); }
         .btn.reveal.shown { animation: none; }
+        .daily-bonus, .daily-streak-line { animation: none; }
         #hint { animation: none; }
         .icon-btn, .switch, .switch-knob { transition: none; }
       }

@@ -8,11 +8,42 @@ level        best@boss  boss TTK  survivors  attacks           hits   lost   pic
 level_001    276        6.6s      93%        sweep_fire        2      1      32      z=50 barricade@50           PASS
 level_002    371        7.2s      93%        sweep_fire+slam   3      1      45      z=48 barricade@48           PASS
 level_003    482        8.0s      92%        sweep_fire+slam   3      1      65      z=41 enemy@52               PASS
+level_004    538        8.0s      92%        sweep_fire+slam   3      2      80      z=50 barricade@50           PASS
+level_005    612        8.3s      89%        slam+sweep_fire   3      21     93      z=40 barricade@40           PASS
+level_006    676        8.8s      88%        slam+slam+sweep   3      24     86      z=94 gate@94                PASS
+level_007    738        8.9s      85%        sweep+cross       3      49     55      z=54 barricade@54           PASS
+level_008    816        9.0s      82%        slam+cross+sweep  3      79     75      z=56 barricade@56           PASS
+level_009    888        9.6s      79%        cross+cross+sweep+slam  4      111    75      z=56 barricade@56           PASS
+level_010    946        9.7s      76%        slam+cross+cross+sweep  4      145    197     z=53 enemy@54               PASS
+level_011    1055       10.2s     73%        cross+slam+cross+cross+sweep  4      188    175     z=54 enemy@66               PASS
+level_012    1263       10.7s     70%        cross+cross+cross+slam+sweep  4      260    210     z=41 enemy@52               PASS
 
 BEST path:
   level_001.json: gate@22 add12 5→17 | broke barricade@50 | gate@78 mul2 17→34 | pickup@112 +12 → 46 | objective@132 +18 → 64 | broke barricade@156 | gate@160 mul4 64→256 | pickup@200 +20 → 276 | boss@222 standoff with 276 | boss sweep_fire@0.75 -1 → 262 | boss dead in 6.6s with 258 → finish with 258
   level_002.json: gate@22 add18 5→23 | broke barricade@48 | gate@74 mul3 23→69 | pickup@102 +15 → 84 | objective@128 +30 → 114 | broke barricade@152 | gate@156 mul3 114→342 | killed enemy@184 | broke barricade@208 | pickup@194 +30 → 371 | boss@238 standoff with 371 | boss sweep_fire@0.75 -1 → 345 | boss dead in 7.2s with 344 → finish with 344
   level_003.json: gate@24 add20 5→25 | gate@80 mul2 25→50 | broke barricade@106 | pickup@118 +25 → 75 | objective@132 +40 → 115 | broke barricade@156 | gate@160 add89 115→204 | killed enemy@188 | pickup@198 +40 → 241 | broke barricade@214 | gate@240 mul2 241→482 | boss@272 standoff with 482 | boss sweep_fire@0.75 -1 → 448 | boss dead in 8.0s with 444 → finish with 444
+  level_004.json: gate@24 add24 5→29 | broke barricade@50 | blade@64 -0 → 29 | gate@90 mul2 29→58 | pickup@122 +25 → 83 | objective@142 +40 → 123 | blade@170 -0 → 123 | broke barricade@196 | gate@200 add93 123→216 | killed enemy@226 | pickup@236 +55 → 269 | broke barricade@252 | gate@274 mul2 269→538 | boss@300 standoff with 538 | boss sweep_fire@0.75 -2 → 499 | boss dead in 8.0s with 494 → finish with 494
+  level_005.json: gate@24 add24 5→29 | broke barricade@40 | pickup@76 +18 → 47 | gate@92 mul2 47→94 | blade@116 -0 → 94 | pickup@148 +25 → 119 | objective@168 +40 → 159 | broke barricade@194 | broke barricade@216 | gate@220 add99 159→258 | killed enemy@246 | pickup@256 +50 → 306 | broke barricade@272 | gate@288 mul2 306→612 | boss@312 standoff with 612 | boss slam@0.00 -21 → 577 | boss dead in 8.3s with 544 → finish with 544
+  level_006.json: gate@24 add28 5→33 | pickup@72 +28 → 61 | gate@94 mul2 61→122 | broke barricade@116 | blade@128 -0 → 122 | objective@152 +65 → 187 | blade@176 -4 → 183 | broke barricade@200 | gate@206 add99 183→282 | killed enemy@232 | pickup@242 +58 → 338 | broke barricade@262 | gate@304 mul2 338→676 | boss@332 standoff with 676 | boss slam@0.00 -24 → 637 | boss dead in 8.8s with 597 → finish with 597
+  level_007.json: gate@24 add25 5→30 | broke barricade@54 | blade@70 -0 → 30 | gate@84 mul2 30→60 | pickup@122 +30 → 85 | objective@146 +38 → 123 | broke barricade@170 | blade@176 -0 → 123 | gate@196 add98 123→221 | blade@220 -0 → 221 | pickup@234 +25 → 246 | broke barricade@254 | gate@280 mul3 246→738 | boss@312 standoff with 738 | boss crossfire@0.80 -47 → 653 | boss sweep_fire@0.75 -2 → 637 | boss dead in 8.9s with 628 → finish with 628
+  level_008.json: gate@24 add24 5→29 | broke barricade@56 | gate@78 mul2 29→58 | killed enemy@102 | pickup@116 +30 → 83 | objective@140 +50 → 133 | blade@164 -0 → 133 | blade@174 -0 → 133 | gate@196 add99 133→232 | broke barricade@220 | pickup@234 +45 → 277 | killed enemy@256 | gate@286 mul3 272→816 | boss@320 standoff with 816 | boss slam@0.00 -28 → 769 | boss crossfire@0.80 -51 → 697 | boss dead in 9.0s with 670 → finish with 670
+  level_009.json: gate@24 add28 5→33 | broke barricade@56 | blade@72 -0 → 33 | gate@86 mul2 33→66 | pickup@122 +35 → 92 | objective@146 +45 → 137 | blade@170 -0 → 129 | killed enemy@188 | gate@196 add97 129→226 | blade@214 -0 → 226 | pickup@228 +40 → 266 | blade@238 -0 → 266 | gate@248 add30 266→296 | broke barricade@272 | gate@300 mul3 296→888 | boss@334 standoff with 888 | boss crossfire@0.80 -58 → 807 | boss crossfire@-1.20 -53 → 732 | boss dead in 9.6s with 701 → finish with 701
+  level_010.json: gate@24 add24 5→29 | pickup@62 +16 → 45 | blade@76 -0 → 45 | pickup@90 +15 → 60 | pickup@97 +15 → 75 | gate@104 mul2 75→150 | broke barricade@130 | objective@148 +50 → 200 | killed enemy@168 | pickup@180 +35 → 220 | blade@194 -0 → 220 | pickup@206 +28 → 248 | pickup@212 +28 → 276 | gate@220 mul3 276→828 | killed enemy@248 | pickup@260 +60 → 886 | broke barricade@282 | gate@306 add60 886→946 | boss@350 standoff with 946 | boss slam@0.00 -33 → 892 | boss crossfire@0.80 -59 → 808 | boss crossfire@-1.20 -53 → 735 | boss dead in 9.7s with 719 → finish with 719
+  level_011.json: gate@24 add25 5→30 | blade@54 -0 → 27 | pickup@74 +20 → 47 | blade@84 -0 → 47 | broke barricade@106 | gate@114 mul4 47→188 | objective@148 +50 → 238 | killed enemy@166 | pickup@178 +35 → 262 | blade@190 -0 → 262 | blade@200 -3 → 259 | pickup@212 +25 → 284 | pickup@218 +25 → 309 | gate@226 mul3 309→927 | broke barricade@248 | killed enemy@272 | pickup@284 +70 → 995 | blade@300 -0 → 995 | gate@316 add60 995→1055 | boss@366 standoff with 1055 | boss crossfire@0.80 -69 → 959 | boss slam@0.80 -1 → 933 | boss crossfire@-1.20 -62 → 849 | boss crossfire@0.00 -56 → 775 | boss dead in 10.2s with 771 → finish with 771
+  level_012.json: gate@24 add26 5→31 | blade@64 -0 → 31 | blade@76 -0 → 31 | pickup@86 +20 → 51 | blade@100 -0 → 51 | broke barricade@118 | gate@126 mul4 51→204 | objective@158 +60 → 264 | killed enemy@176 | pickup@188 +30 → 282 | pickup@194 +30 → 312 | blade@208 -0 → 312 | blade@218 -0 → 312 | pickup@230 +25 → 337 | pickup@236 +25 → 362 | gate@244 mul3 362→1086 | broke barricade@270 | killed enemy@294 | pickup@306 +80 → 1164 | blade@322 -0 → 1164 | gate@338 add99 1164→1263 | boss@390 standoff with 1263 | boss crossfire@0.80 -83 → 1147 | boss crossfire@-1.20 -75 → 1040 | boss crossfire@0.00 -69 → 946 | boss slam@0.00 -33 → 895 | boss dead in 10.7s with 887 → finish with 887
+
+Daily challenge — 182 days from 2026-10-19, each generated level held to the same rule
+
+difficulty  days  pass  best@boss    min survivors  min boss TTK
+----------  ----  ----  -----------  -------------  ------------
+1 (Mon)     26    26    110-756      90%            7.1s        
+2 (Tue)     26    26    106-486      89%            7.6s        
+3 (Wed)     26    26    102-360      87%            6.7s        
+4 (Thu)     26    26    75-400       78%            7.1s        
+5 (Fri)     26    26    64-247       76%            8.1s        
+6 (Sat)     26    26    86-258       73%            8.8s        
+7 (Sun)     26    26    77-323       68%            10.2s       
+total       182   182   64-756       68%            6.7s        
 
 All levels pass the §15 rule.
 

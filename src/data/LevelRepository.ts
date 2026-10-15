@@ -20,12 +20,14 @@ export interface ILevelRepository {
 
 const SEGMENT_TYPES: readonly string[] = [
   'gate_pair', 'barricade', 'enemy_crowd', 'objective_node',
-  'boss', 'finish', 'coin_pickup', 'crowd_pickup',
+  'boss', 'finish', 'coin_pickup', 'crowd_pickup', 'blade',
 ];
 const GATE_OPS: readonly string[] = ['add', 'mul', 'sub', 'div'];
 // Mirrors Boss ATTACK_KINDS. An unknown name is only a warning: Boss drops it.
-const KNOWN_ATTACKS: readonly string[] = ['sweep_fire', 'slam'];
+const KNOWN_ATTACKS: readonly string[] = ['sweep_fire', 'slam', 'crossfire'];
 const HP_TYPES: readonly string[] = ['barricade', 'objective_node', 'boss'];
+// The entities that call track(): anything else would silently ignore a motion.
+const MOTION_TYPES: readonly string[] = ['barricade', 'enemy_crowd', 'coin_pickup', 'crowd_pickup', 'blade'];
 
 /** 1-based progression index → 1..count. Handles n < 1 (count must be >= 1). */
 export function wrapIndex(n: number, count: number): number {
@@ -49,6 +51,14 @@ function gateSideProblem(side: unknown): string | null {
   if (!isPos(side.value)) return `value ${JSON.stringify(side.value)} must be a finite number > 0`;
   // ×0.5 would shrink and ÷0.5 would grow: a gate's colour must not lie about its sign
   if ((side.op === 'mul' || side.op === 'div') && side.value < 1) return `${side.op} value ${side.value} must be >= 1`;
+  return null;
+}
+
+function motionProblem(m: unknown): string | null {
+  if (!isObj(m)) return 'is not an object';
+  if (!isNum(m.amp) || m.amp < 0) return `amp ${JSON.stringify(m.amp)} must be a finite number >= 0`;
+  if (!isPos(m.period)) return `period ${JSON.stringify(m.period)} must be a finite number > 0`;
+  if (m.phase !== undefined && !isNum(m.phase)) return `phase ${JSON.stringify(m.phase)} must be a finite number`;
   return null;
 }
 
@@ -99,6 +109,9 @@ export function validateLevel(raw: unknown, file: string, cfg: GameConfig): Leve
       if (!Array.isArray(lanes) || lanes.length === 0 || !lanes.every(isPos)) {
         throw new Error(`${where}: multiplierLanes must be a non-empty array of finite numbers > 0`);
       }
+    } else if (type === 'blade') {
+      if (!isPos(seg.width)) throw new Error(`${where}: width must be a finite number > 0`);
+      if (!isPos(seg.kill) || seg.kill > 1) throw new Error(`${where}: kill must be a finite number in (0, 1]`);
     } else if (!isPos(seg.value)) {
       // coin_pickup / crowd_pickup
       throw new Error(`${where}: value must be a finite number > 0`);
@@ -118,6 +131,13 @@ export function validateLevel(raw: unknown, file: string, cfg: GameConfig): Leve
     }
     if (type === 'finish') hasFinish = true;
 
+    // JSON has no undefined, so a present `motion` (even null) is a real field
+    if (seg.motion !== undefined) {
+      if (!MOTION_TYPES.includes(type)) throw new Error(`${where}: motion is not allowed on ${type}`);
+      const problem = motionProblem(seg.motion);
+      if (problem) throw new Error(`${where}: motion ${problem}`);
+    }
+
     // ---- soft: the game runs, but the author probably did not mean it
     if (seg.z < prevZ && !unsortedWarned) {
       console.warn(`${where}: segments are not sorted by z (${seg.z} after ${prevZ})`);
@@ -127,6 +147,14 @@ export function validateLevel(raw: unknown, file: string, cfg: GameConfig): Leve
     if (seg.z < 0 || seg.z > length) console.warn(`${where}: z ${seg.z} is outside [0, ${length}]`);
     if (seg.x !== undefined && !(isNum(seg.x) && seg.x >= minX && seg.x <= maxX)) {
       console.warn(`${where}: x ${String(seg.x)} is outside the track [${minX}, ${maxX}]`);
+    }
+    if (isObj(seg.motion) && isNum(seg.motion.amp) && seg.motion.amp > 0) {
+      // |x| + amp past the half-width: the sway carries it off the track
+      const x = isNum(seg.x) ? seg.x : 0;
+      const amp = seg.motion.amp;
+      if (Math.abs(x) + amp > (maxX - minX) / 2) {
+        console.warn(`${where}: x ${x} ± amp ${amp} sweeps outside the track [${minX}, ${maxX}]`);
+      }
     }
   }
 
