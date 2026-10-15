@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { NumberPlate } from '../util/Label';
+import { motionX, type MotionDef } from '../core/Motion';
 import type { GameConfig, Segment } from '../data/types';
 
 // A numbered wall. Shoot its HP to zero to pass free; ram it while HP>0 and the
@@ -7,7 +8,9 @@ import type { GameConfig, Segment } from '../data/types';
 
 export class Barricade {
   readonly group = new THREE.Group();
-  readonly x: number;
+  /** Authored centre. `x` is where the wall stands now; they differ only with motion. */
+  readonly baseX: number;
+  x: number;
   readonly z: number;
   readonly halfWidth: number;
   hp: number;
@@ -21,10 +24,13 @@ export class Barricade {
   private breaking = -1;
   private punch = 0;
   private readonly ramFactor: number;
+  private readonly motion: MotionDef | undefined;
 
   constructor(seg: Segment, cfg?: GameConfig) {
     this.ramFactor = cfg?.barricade?.ramFactor ?? 0.8;
-    this.x = seg.x ?? 0;
+    this.baseX = seg.x ?? 0;
+    this.x = this.baseX;
+    this.motion = seg.motion;
     this.z = seg.z;
     const width = seg.width ?? 2.0;
     this.halfWidth = width / 2;
@@ -36,7 +42,7 @@ export class Barricade {
       new THREE.BoxGeometry(width, h, 0.7),
       new THREE.MeshStandardMaterial({ color: 0x6b7280, roughness: 0.9 }),
     );
-    this.box.position.set(this.x, h / 2, this.z);
+    this.box.position.set(this.baseX, h / 2, this.z);
     this.box.castShadow = true;
     this.box.receiveShadow = true;
     this.group.add(this.box);
@@ -46,13 +52,24 @@ export class Barricade {
       new THREE.BoxGeometry(width + 0.02, 0.18, 0.72),
       new THREE.MeshStandardMaterial({ color: 0xff5a52, emissive: 0x551210, roughness: 0.7 }),
     );
-    this.stripe.position.set(this.x, h - 0.2, this.z);
+    this.stripe.position.set(this.baseX, h - 0.2, this.z);
     this.group.add(this.stripe);
 
     this.plate = new NumberPlate(1.3, '#ffffff');
-    this.plate.mesh.position.set(this.x, h + 0.55, this.z);
+    this.plate.mesh.position.set(this.baseX, h + 0.55, this.z);
     this.plate.set(String(Math.ceil(this.hp)));
     this.group.add(this.plate.mesh);
+  }
+
+  /**
+   * Slides the wall to where its sweep puts it at run time `t`. The children
+   * stay built at baseX and the group carries the offset, so the punch and
+   * break scales keep pivoting on each mesh's own centre.
+   */
+  track(t: number): void {
+    if (!this.motion) return;
+    this.x = motionX(this.baseX, this.motion, t);
+    this.group.position.x = this.x - this.baseX;
   }
 
   /** Lane overlap test for targeting. */

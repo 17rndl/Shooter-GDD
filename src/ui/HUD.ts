@@ -6,27 +6,70 @@ import { clamp } from '../util/MathUtil';
 const COIN_COUNT_DURATION = 1.0; // seconds for the reward coin roll-up
 const COIN_TICK_INTERVAL = 0.06; // seconds between onCoinTick calls during it
 
+/** What a daily clear paid, for the reward ceremony. */
+export interface DailyRewardInfo {
+  /** First clear of its day: only that one pays the bonus and moves the streak. */
+  firstClear: boolean;
+  /** Consecutive days cleared, this one included. */
+  streak: number;
+  /** Coins banked on top of the level's own (0 on a repeat clear). */
+  bonus: number;
+}
+
 export interface RewardCeremonyOpts {
   survivors: number;
   mult: number;
   coins: number;
   best: number;
   isNewBest: boolean;
+  /** Defaults to LEVEL CLEAR! */
+  title?: string;
+  /** The primary button; defaults to NEXT LEVEL. */
+  nextText?: string;
+  /** A daily run's payout line under the coins. */
+  daily?: DailyRewardInfo | null;
   onNext: () => void;
   onDouble: () => void;
   onShop: () => void;
+}
+
+/** The menu's DAILY CHALLENGE card. */
+export interface DailyCardOpts {
+  /** 'MON' ... 'SUN'. */
+  weekday: string;
+  /** 1 (Monday) ... 7 (Sunday): that many of the 7 pips light up. */
+  difficulty: number;
+  /** Live clear streak; 0 once it has lapsed. */
+  streak: number;
+  /** Today's best peak crowd; 0 = not played yet today. */
+  best: number;
+  cleared: boolean;
+  /** Coins today's first clear adds to the level's own; 0 once cleared. */
+  bonus: number;
+  onPlay: () => void;
 }
 
 export interface OverlayOpts {
   title: string;
   body?: string;
   extraHTML?: string;
+  /** Rendered into the extra area, after extraHTML. */
+  daily?: DailyCardOpts;
   btnText: string;
   onBtn: () => void;
   btn2Text?: string;
   onBtn2?: () => void;
   btn3Text?: string;
   onBtn3?: () => void;
+}
+
+const PIPS = 7;
+
+function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, text?: string): HTMLElementTagNameMap[K] {
+  const e = document.createElement(tag);
+  e.className = className;
+  if (text !== undefined) e.textContent = text;
+  return e;
 }
 
 export class HUD {
@@ -46,6 +89,8 @@ export class HUD {
   private overlayBtn2 = document.getElementById('overlay-btn2') as HTMLButtonElement;
   private overlayBtn3 = document.getElementById('overlay-btn3') as HTMLButtonElement;
   private overlayBtns = [this.overlayBtn, this.overlayBtn2, this.overlayBtn3];
+  /** The daily card's PLAY button while the menu shows one; locked with the overlay buttons. */
+  private dailyBtn: HTMLButtonElement | null = null;
   private gear = document.getElementById('gear') as HTMLButtonElement;
 
   private flashEl: HTMLDivElement;
@@ -145,6 +190,7 @@ export class HUD {
     for (let i = 0; i < this.overlayBtns.length; i++) {
       if (this.busyText[i] === null) this.overlayBtns[i].disabled = locked;
     }
+    if (this.dailyBtn) this.dailyBtn.disabled = locked;
   }
 
   private clearBusy(): void {
@@ -156,6 +202,8 @@ export class HUD {
   }
 
   setLevel(n: number): void { this.levelLabel.textContent = `LEVEL ${n}`; }
+  /** A run off the level ladder (the daily) names itself instead of a number. */
+  setLevelText(text: string): void { this.levelLabel.textContent = text; }
   setCoins(n: number): void { this.coins.textContent = String(Math.floor(n)); }
   setProgress(frac: number): void {
     this.progressFill.style.width = `${Math.max(0, Math.min(1, frac)) * 100}%`;
@@ -288,12 +336,13 @@ export class HUD {
       ? `<div class="best-badge">NEW BEST · ${o.best}</div>`
       : `<div class="best-line">Best: ${o.best}</div>`;
     this.showOverlay({
-      title: 'LEVEL CLEAR!',
+      title: o.title ?? 'LEVEL CLEAR!',
       body: `${o.survivors} survivors · ×${o.mult} lane`,
       extraHTML:
         '<div class="reward-coins">+<span id="reward-coin-num">0</span> ●' +
-        '<span id="reward-coin-tag" class="coin-tag hidden">doubled!</span></div>' + bestHTML,
-      btnText: 'NEXT LEVEL',
+        '<span id="reward-coin-tag" class="coin-tag hidden">doubled!</span></div>' +
+        (o.daily ? dailyRewardHTML(o.daily) : '') + bestHTML,
+      btnText: o.nextText ?? 'NEXT LEVEL',
       onBtn: o.onNext,
       btn2Text: '×2 COINS (AD)',
       onBtn2: o.onDouble,
@@ -347,6 +396,9 @@ export class HUD {
     this.overlayTitle.textContent = o.title;
     this.overlayBody.innerHTML = o.body ?? '';
     this.overlayExtra.innerHTML = o.extraHTML ?? '';
+    this.dailyBtn = o.daily ? this.buildDailyCard(o.daily) : null;
+    // index.html tightens a menu carrying the card on short screens
+    this.overlay.classList.toggle('with-card', !!o.daily);
     this.overlayBtn.textContent = o.btnText;
     this.overlayBtn.onclick = o.onBtn;
     if (o.btn2Text && o.onBtn2) {
@@ -366,10 +418,53 @@ export class HUD {
       this.overlayBtn3.onclick = null;
     }
     this.overlay.classList.add('show');
+    this.overlay.scrollTop = 0; // a short screen scrolls the overlay: every screen starts at its title
   }
 
   hideOverlay(): void {
     this.overlay.classList.remove('show');
     this.coinDur = 0; // a dismissed ceremony must not keep ticking coins
   }
+
+  /** Appends the DAILY CHALLENGE card to the extra area; returns its PLAY button. */
+  private buildDailyCard(o: DailyCardOpts): HTMLButtonElement {
+    const card = el('section', o.cleared ? 'daily-card cleared' : 'daily-card');
+    card.setAttribute('aria-label', 'Daily challenge');
+
+    const head = el('div', 'daily-head');
+    head.appendChild(el('span', 'daily-title', 'DAILY CHALLENGE'));
+    if (o.cleared) head.appendChild(el('span', 'daily-tick', '✓ CLEARED'));
+    card.appendChild(head);
+
+    const row = el('div', 'daily-row');
+    row.appendChild(el('span', 'daily-day', o.weekday));
+    const pips = el('span', 'daily-pips');
+    pips.setAttribute('role', 'img');
+    pips.setAttribute('aria-label', `Difficulty ${o.difficulty} of ${PIPS}`);
+    for (let i = 1; i <= PIPS; i++) pips.appendChild(el('i', i <= o.difficulty ? 'on' : ''));
+    row.appendChild(pips);
+    const stats = el('span', 'daily-stats');
+    const streak = el('span', o.streak > 0 ? 'daily-streak' : 'daily-streak dim', `🔥 ${o.streak}`);
+    streak.setAttribute('aria-label', `${o.streak}-day streak`);
+    stats.appendChild(streak);
+    stats.appendChild(el('span', o.best > 0 ? 'daily-best' : 'daily-best dim', `BEST ${o.best > 0 ? o.best : '–'}`));
+    row.appendChild(stats);
+    card.appendChild(row);
+
+    const btn = el('button', 'btn gold small daily-play', 'PLAY DAILY');
+    btn.type = 'button';
+    if (o.bonus > 0) btn.appendChild(el('span', 'daily-bonus-tag', `+${o.bonus} ●`));
+    btn.onclick = o.onPlay;
+    card.appendChild(btn);
+
+    this.overlayExtra.appendChild(card);
+    return btn;
+  }
+}
+
+/** The ceremony's daily line: the bonus and streak on a first clear, a quiet note on a repeat. */
+function dailyRewardHTML(d: DailyRewardInfo): string {
+  const streak = `🔥 ${d.streak}-day streak`;
+  if (!d.firstClear) return `<div class="best-line">Already cleared today · ${streak}</div>`;
+  return `<div class="daily-bonus">DAILY BONUS +${d.bonus} ●</div><div class="daily-streak-line">${streak}</div>`;
 }

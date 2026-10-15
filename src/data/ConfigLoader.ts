@@ -5,7 +5,7 @@ import type { GameConfig } from './types';
 // of surfacing later as a NaN deep inside a system.
 
 const SECTIONS: readonly string[] = [
-  'track', 'crowd', 'combat', 'boss', 'gates', 'barricade', 'pickup', 'meta', 'economy', 'skins', 'ads',
+  'track', 'crowd', 'combat', 'boss', 'gates', 'barricade', 'pickup', 'meta', 'economy', 'skins', 'ads', 'daily',
 ];
 const HEX = /^#[0-9a-f]{6}$/i;
 

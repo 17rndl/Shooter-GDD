@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { UnitInstancer } from '../crowd/UnitInstancer';
 import { NumberPlate } from '../util/Label';
 import { phyllotaxis, type Vec2 } from '../util/MathUtil';
+import { motionX, type MotionDef } from '../core/Motion';
 import type { GameConfig, Segment } from '../data/types';
 
 // A free reward lying on the lane: a coin trail for the meta economy, or a small
@@ -18,7 +19,9 @@ const COLLECT_TIME = 0.25;
 export class Pickup {
   readonly group = new THREE.Group();
   readonly kind: 'coin' | 'crowd';
-  readonly x: number;
+  /** Authored centre. `x` is where the pickup lies now; they differ only with motion. */
+  readonly baseX: number;
+  x: number;
   readonly z: number;
   readonly value: number;
   readonly halfWidth: number;
@@ -32,10 +35,13 @@ export class Pickup {
   private scratch: Vec2 = { x: 0, z: 0 };
   private collecting = -1;
   private readonly spacing: number;
+  private readonly motion: MotionDef | undefined;
 
   constructor(seg: Segment, cfg: GameConfig, unitColor = CROWD_BLUE) {
     this.kind = seg.type === 'crowd_pickup' ? 'crowd' : 'coin';
-    this.x = seg.x ?? 0;
+    this.baseX = seg.x ?? 0;
+    this.x = this.baseX;
+    this.motion = seg.motion;
     this.z = seg.z;
     this.value = seg.value ?? 10;
     this.halfWidth = cfg.pickup.halfWidth;
@@ -80,6 +86,13 @@ export class Pickup {
     this.plate.set(`+${this.value}`);
     this.group.add(this.plate.mesh);
     this.fadeMats.push(this.plate.mesh.material as THREE.Material);
+  }
+
+  /** Slides the pickup to where its sweep puts it at run time `t`; its children are local, so the group carries it. */
+  track(t: number): void {
+    if (!this.motion) return;
+    this.x = motionX(this.baseX, this.motion, t);
+    this.group.position.x = this.x;
   }
 
   /** Phyllotaxis squad layout with a gentle bob, in the group's local space. */

@@ -17,31 +17,34 @@ Target layout is GDD §13: `Assets/_Game/Scripts/{Core,Systems,Crowd,Entities,Da
 | Prototype file | Unity home | Port | What carries over |
 |---|---|---|---|
 | `src/main.ts` | `Core/Boot` (Boot scene) | Glue | Boot order: load config, then levels, then build GameManager. |
-| `src/core/GameManager.ts` | `Core/GameManager` + `GameStateMachine`; `Systems/*` | Mixed | `simulate()` is the §13 system order: Input → Movement → Formation (`crowd.update`) → Combat → Gate → Collision → boss chip → HUD. Split it into systems in **that order**. The pure parts are Verbatim: `findTargets` (split fire, see §5), `scaleSegment` (wrap scaling), `crowdHalf`, the revive amount `max(10, floor(peak·reviveFraction))`, the payout `round(survivors·(coinPerUnit+income)·max(1,mult))`, the finish-lane preview and the danger rule. States: `MENU → PLAYING ⇄ BOSS → WIN → REWARD`, and `LOSE → revive → resumeState`. |
+| `src/core/GameManager.ts` | `Core/GameManager` + `GameStateMachine`; `Systems/*` | Mixed | `simulate()` is the §13 system order: run clock (`runTime += dt`) → Input → Movement → Formation (`crowd.update`) → Motion (`trackMovers(runTime)`) → Combat → Gate → Collision (barricade rams → blade cuts → pickups → finish) → boss chip → HUD. Split it into systems in **that order**. The pure parts are Verbatim: `findTargets` (split fire, see §5), `scaleSegment` (wrap scaling), `crowdHalf`, the blade cut (§8), the revive amount `max(10, floor(peak·reviveFraction))`, the payout `round(survivors·(coinPerUnit+income)·max(1,mult))`, the daily bonus (§9), the finish-lane preview and the danger rule. States: `MENU → PLAYING ⇄ BOSS → WIN → REWARD`, and `LOSE → revive → resumeState`. Run mode: `campaign` (the saved ladder) or `daily` (a generated level that never reads or writes `currentLevel` and has 0 wraps). |
 | `src/core/WorldSpace.ts` | `Core/WorldSpace` | Verbatim, **sign = +1** | See §2. |
+| `src/core/Motion.ts` | `Core/Motion` | Verbatim | `MotionDef` and `motionX` (§8). The sim mirrors it bit for bit. |
 | `src/systems/InputSystem.ts` | `Systems/InputSystem` | Glue | Absolute mapping: touch X as a 0..1 fraction of screen width, clamped. Ignore touches that start on UI (`EventSystem.IsPointerOverGameObject`). |
 | `src/crowd/CrowdController.ts` | `Crowd/CrowdController` | Mixed | Verbatim: `effectiveDPS`, `laneHalf`, `damage` (fractional loss accumulator), `kill`, `visibleCount`, `visualSwell`. Glue: the phyllotaxis layout loop, the birth ripple and the death pops. |
 | `src/crowd/UnitInstancer.ts` | `Crowd/UnitInstancer` | Glue | One instanced draw for the whole crowd (§5). |
 | `src/combat/BulletPool.ts`, `ParticlePool.ts` | `Systems/CombatSystem` visuals over `Util/ObjectPool` | Glue | Visual only, capped, never carries damage. `setColor` tints the tracer material to the equipped skin. |
 | `src/entities/GatePair.ts` | `Entities/GatePair` | Mixed | Verbatim: `applyFor` (add / mul with `round` / sub / div with `floor`, clamped ≥ 0, nearest door wins), `hit` (tick accumulator; add/mul climb to `addCap`/`mulCap`, sub/div decay to `decayFloor`), `overlappingHalf`. Door meshes become a prefab. |
-| `src/entities/Boss.ts` | `Entities/Boss` | Mixed | Verbatim: the attack registry (`sweep_fire`, `slam`; unknown names dropped, empty falls back to sweep), cooldown/telegraph lerps by `hurt`, the slam lock-on and clamp, the overlap-fraction loss, and the `rollBand` anti-repeat. |
-| `src/entities/Barricade.ts` | `Entities/Barricade` | Mixed | Verbatim: `ramPenalty = ceil(hp·ramFactor)`, `overlapsLane`. |
-| `src/entities/EnemyCrowd.ts` | `Entities/EnemyCrowd` | Mixed | Verbatim: `enemyDPS`, `overlapsLane` (half = `max(0.4, spacing·√count·0.5)`). |
-| `src/entities/ObjectiveNode.ts`, `Finish.ts`, `Pickup.ts` | `Entities/` | Mixed | Verbatim: the reward on clear, `Finish.pickFor`, and lane centres from WorldSpace. Pickup resolution lives in `GameManager.collisionSystem`. |
+| `src/entities/Boss.ts` | `Entities/Boss` | Mixed | Verbatim: the attack registry (`sweep_fire`, `slam`, `crossfire`, cycled in authored order; unknown names dropped, empty falls back to sweep), cooldown/telegraph lerps by `hurt`, the slam lock-on and clamp, the overlap-fraction loss, the crossfire resolve (§8), and the `rollCenter(half)` anti-repeat (`bandHalf` for a sweep, `crossfireGapHalf` for a crossfire gap; both share one previous centre). |
+| `src/entities/Barricade.ts` | `Entities/Barricade` | Mixed | Verbatim: `ramPenalty = ceil(hp·ramFactor)`, `overlapsLane`, `track(t)` (`x = motionX(baseX, motion, t)`). |
+| `src/entities/EnemyCrowd.ts` | `Entities/EnemyCrowd` | Mixed | Verbatim: `enemyDPS`, `overlapsLane` (half = `max(0.4, spacing·√count·0.5)`), `track(t)`. Return fire starts at the current `x`. |
+| `src/entities/ObjectiveNode.ts`, `Finish.ts`, `Pickup.ts` | `Entities/` | Mixed | Verbatim: the reward on clear, `Finish.pickFor`, lane centres from WorldSpace, `Pickup.track(t)`. Pickup resolution lives in `GameManager.collisionSystem`. |
+| `src/entities/Blade.ts` | `Entities/Blade` | Mixed | Glue: the saw, rail, danger glow and spark spray. Verbatim: `track(t)`. The cut itself lives in `GameManager.collisionSystem` (§8). Never a bullet target, never in `findTargets`. |
 | `src/world/Track.ts` | Track prefab under `Entities/` | Glue | Static strip, rails and chevrons. |
 | `src/data/types.ts` | `Data/GameConfig.cs`, `LevelDefinition.cs`, `SaveData.cs` | Verbatim shapes | `[Serializable]` classes (see §3). |
 | `src/data/ConfigLoader.ts` | `Data/ConfigLoader` | Mixed | `validateConfig` is Verbatim. Replace `fetch` with `Resources.Load<TextAsset>("config")`. |
 | `src/data/LevelRepository.ts` | `Data/LevelRepository` | Mixed | `validateLevel`, `wrapIndex`, `wrapsFor` and `parseManifest` are Verbatim, including the error strings. `FetchLevelRepository` becomes `ResourcesLevelRepository`. Cache by wrapped index and never mutate a cached definition. |
+| `src/data/LevelGenerator.ts` | `Data/LevelGenerator` | Verbatim | The daily challenge generator and its date/seed helpers (§9). Its output goes through `validateLevel` like an authored file. |
 | `src/services/AdService.ts` | `Services/IAdService`, `AdGate`, `MaxAdService`, `AdServiceStub` | `AdGate` Verbatim | See §4. |
 | `src/services/IapService.ts` | `Services/IIapService`, `UnityIapService` | Glue behind the interface | See §4. |
 | `src/services/HapticsService.ts` | `Services/IHapticsService`, `AndroidHapticsService` | Throttle Verbatim | See §4. |
-| `src/services/SaveService.ts` | `Services/SaveService` | Mixed | `sanitizeSave` is Verbatim. Storage is Glue (§4). |
+| `src/services/SaveService.ts` | `Services/SaveService` | Mixed | `sanitizeSave`, `recordDailyResult` and `recordDailyClear` are Verbatim. Storage is Glue (§4). |
 | `src/services/AudioService.ts` | `Services/AudioService` | Rewrite | See §4. |
 | `src/ui/HUD.ts`, `ShopPanel.ts`, `SettingsPanel.ts`, `index.html` | `UI/` (uGUI or UI Toolkit) | Glue | Verbatim rules: upgrade cost `ceil(upgradeCostBase·upgradeCostGrowth^level)` with max level 10, the skin card states (EQUIPPED / EQUIP / price), the store in-flight lock, and the two-tap reset (the second tap counts only between 450 ms and 3 s after the first, and a held key's auto-repeat never counts). |
 | `src/util/MathUtil.ts` | `Util/MathUtil` | Verbatim | `clamp`, `lerp`, `damp` (frame-rate independent), `phyllotaxis`, `spansOverlap`. |
 | `src/util/Label.ts` | TextMeshPro world-space text | Glue | Redraw only when the value changes. |
 | `scripts/balance-sim.mjs` | `Tests/EditMode/BalanceSimTests` | Port | See §6. |
-| `public/config.json`, `public/levels/*.json` | `Assets/_Game/Resources/config.json`, `Resources/levels/` | Same files | `Resources.Load` takes the path without the extension. Strip `.json` from manifest entries. |
+| `public/config.json`, `public/levels/*.json` | `Assets/_Game/Resources/config.json`, `Resources/levels/` | Same files | `Resources.Load` takes the path without the extension. Strip `.json` from manifest entries. `levels/chunks.json` (the daily's chunk library) is not in the manifest; a load or generation failure hides the daily, it never fails the boot. |
 
 **Wrap scaling (endless mode)** is a Verbatim rule:
 
@@ -81,12 +84,15 @@ Every screen-authored placement goes through this one function:
 
 **Authored level `x` values are in the Three.js world frame.** For example, `x: 1.4` is screen-left. To keep the same screen layout, the Unity importer must negate every segment `x` (`xUnity = -x`). The track bounds become `[-maxX, -minX]`, which is unchanged while the track is the symmetric ±3.
 
+**A swaying segment also needs its phase shifted by half a turn.** Negating `x + amp·sin(θ)` gives `-x + amp·sin(θ + π)`, so the importer writes `phaseUnity = frac((phase ?? 0) + 0.5)` next to `xUnity = -x`. Keep `amp` as authored: validation requires `amp >= 0`, so the sign can't go there. A prop that only had `x` negated would sweep in the mirrored direction and reach the crowd on the wrong side of the track. The daily generator (§9) works in the authored frame, so convert its output with the same importer step after `generateDaily`, never the chunks before it.
+
 Gate `left`/`right` in JSON are **screen** labels. Do not swap them in data, because WorldSpace already places them.
 
 What needs no sign handling:
 
 - **Z** is forward (+Z) in both engines.
-- **The boss band** is rolled and clamped in world X. The slam band locks onto the crowd's world X.
+- **The boss band** is rolled and clamped in world X. The slam band locks onto the crowd's world X. The crossfire gap is rolled the same way.
+- **The blade cut and the crossfire resolve** are span overlaps, symmetric in X.
 - **The phyllotaxis offsets** are symmetric.
 - **Camera follow** (`x·0.3`, look-at `x·0.18`) is world-relative.
 
@@ -94,7 +100,9 @@ Every rule depends only on |Δx| and on the symmetric clamps, so a negated level
 
 ## 3. JSON with JsonUtility
 
-- **Flat `Segment` class.** `Segment` is one flat `[Serializable]` class with every optional field: `z, type, left, right, tickable, tickPerHit, x, hp, width, count, fireRate, reward, attacks, multiplierLanes, value`. `GateSide` is `{ op, value }`. Use `float` for anything a designer might make fractional (`z, x, hp, width, fireRate`, gate `value`, lanes). Use `int` for `count`, `reward`, pickup `value` and `tickPerHit`.
+- **Flat `Segment` class.** `Segment` is one flat `[Serializable]` class with every optional field: `z, type, left, right, tickable, tickPerHit, x, hp, width, kill, motion, count, fireRate, reward, attacks, multiplierLanes, value`. `GateSide` is `{ op, value }` and `MotionDef` is `{ amp, period, phase }`. Use `float` for anything a designer might make fractional (`z, x, hp, width, kill, fireRate`, gate `value`, lanes, every `motion` field). Use `int` for `count`, `reward`, pickup `value` and `tickPerHit`. The rule code that reads them (§1 numeric parity) still works in `double`.
+- **`motion` needs a has-flag too.** An absent `motion` arrives as `MotionDef { amp = 0, period = 0, phase = 0 }`, and `validateLevel` would reject `period 0` (and reject motion on a gate or boss). Treat `amp == 0 && period == 0` as "no motion" before validating, or parse with Newtonsoft. An absent `phase` arriving as 0 matches the TS `phase ?? 0`.
+- **The chunk library** is the object `{"chunks": [{ id, tier, length, segments }]}`, the same `Segment` class with z relative to the chunk start. `tier` is an `int` 1–3.
 - **Absent vs 0.** JsonUtility cannot tell an absent key from 0 and has no nullable primitives (`int?` is not serialized). The validator's required-positive checks double as presence checks: `length`, `forwardSpeed`, `hp`, `count`, `value`, gate `value` and `multiplierLanes` all fail with the same message whether the key is absent or zero. `id` and `z` are the exceptions: absent becomes 0 and passes silently, while the TS validator rejects it. Accept that, or parse levels with Newtonsoft (`com.unity.nuget.newtonsoft-json`) and nullable fields.
 - **Defaults.** Do not rely on C# field initializers. `JsonUtility.FromJson` does not run the constructor, so a missing key arrives as `default(T)` (0, `false`, `null`), and array elements such as `Segment[]` are built by the serializer the same way. Apply the non-zero defaults explicitly after parsing, in the importer before `validateLevel`: `tickPerHit` 1, `width` 2.0 and `fireRate` 4 when the parsed value is `<= 0`. 0 is never a meaningful authored value for these: a tickable gate that never ticks, a barricade with no width, an enemy that never fires. This differs from the TS `??` only for an explicit `0`, which no shipped level uses. Pin it with an EditMode test that parses a segment without these keys. `FromJsonOverwrite` onto a `new T()` keeps initializers for a top-level object only, never for array elements.
 - **Gate sides need a has-flag.** Nested `[Serializable]` fields are never null after `FromJson`, so an absent `left` arrives as `GateSide { op = "" or null, value = 0 }`. Treat `string.IsNullOrEmpty(op)` as "side absent" before validating. Absent `attacks` arrives as an empty array, which resolves to `['sweep_fire']` exactly as `undefined` does in TS, so it needs no flag.
@@ -159,7 +167,8 @@ All services sit behind interfaces from day one, so the game runs with stubs and
 - **Atomic writes:** write to a temp file, then `File.Replace` or move it over the real one. A kill mid-write must not corrupt the save.
 - **Sanitize:** run the ported `sanitizeSave` on every load.
 - **Migration gotcha:** JsonUtility turns a missing boolean into `false`, so a save written before `music` existed would load with music off. Either add a `saveVersion` field and migrate explicitly (`< 2` sets `music = true`), or read the save with Newtonsoft.
-- **Reset progress** clears level, coins, best peak, upgrades and skins. It keeps `settings` and `removeAds`: preferences and a paid entitlement are not progress.
+- **Daily block:** `daily { key, best, cleared, streak, lastClearKey }`. JsonUtility hands an old save's missing block over with `null` strings and zeros. `sanitizeSave` maps any key that is not `YYYY-MM-DD` to `''`, derives `cleared` (true when `key` is on or before `lastClearKey`, never read from the file), and zeroes `streak` without a `lastClearKey`. Keys compare as dates with ordinal string comparison (`string.CompareOrdinal`), never a culture-aware one.
+- **Reset progress** clears level, coins, best peak, upgrades, skins and the daily streak. It keeps `settings` and `removeAds`: preferences and a paid entitlement are not progress.
 - **Resolve skins in the game:** match `equippedSkin` against `cfg.skins` and fall back to `cfg.skins[0]`. SaveService does not know the catalog.
 
 ### Audio
@@ -201,10 +210,12 @@ All services sit behind interfaces from day one, so the game runs with stubs and
 
 Port it as an EditMode test that produces the **same text** and compares it to a golden file captured with `npm run --silent balance` (commit it as `Tests/balance-golden.txt`). For a byte-identical match:
 
-- **Data and frame:** read the raw authored JSON, with no x negation, and keep the sim's own `WORLD_X_SIGN = -1`. Give the C# `ScreenToWorldX` an optional sign parameter for this. The sim's tie-breaks are not mirror-symmetric (`dHi >= dLo ? maxX : minX`, `bandCenter < 0 ? maxX : minX`, `BAND_SEQUENCE`), so it must run in the authored frame.
-- **Shared rule code:** call the game's ported rule functions (DPS, gate op and ticks, overlap fraction, split weights) instead of re-implementing them. Then a rule drift in the game breaks the golden. This only works because those functions take and return `double` (§1). Never route the sim through a `float` overload.
-- **Arithmetic:** use double math throughout, including the per-frame hp and fractional-loss accumulators, and the rounding rules from §1.
-- **Fixed inputs:** keep the same `BAND_SEQUENCE`, `LOOKAHEAD` and `DODGE_MARGIN`.
+- **Data and frame:** read the raw authored JSON, with no x negation and no phase shift, and keep the sim's own `WORLD_X_SIGN = -1`. Give the C# `ScreenToWorldX` an optional sign parameter for this. The sim's tie-breaks are not mirror-symmetric (`dHi >= dLo ? maxX : minX`, `bandCenter < 0 ? maxX : minX`, `BAND_SEQUENCE`, `GAP_SEQUENCE`), so it must run in the authored frame. The daily sweep feeds the generator's raw output straight in, for the same reason.
+- **Shared rule code:** call the game's ported rule functions (DPS, gate op and ticks, overlap fraction, split weights, `motionX`, the blade cut, the crossfire resolve) instead of re-implementing them. Then a rule drift in the game breaks the golden. This only works because those functions take and return `double` (§1). Never route the sim through a `float` overload.
+- **Arithmetic:** use double math throughout, including the per-frame hp and fractional-loss accumulators, and the rounding rules from §1. The run clock accumulates (`t += DT`, with the movers placed at `now = t + DT` inside the step), exactly as the game's `runTime += dt`. Never compute it as `step·DT`: over a minute of steps the two disagree in the last bits on almost every step, and every swaying prop's x is read from it.
+- **Fixed inputs:** keep the same `BAND_SEQUENCE`, `GAP_SEQUENCE` (`[0.8, -1.2, 0.0, 1.6, -0.4, -1.7, 1.1]`), `LOOKAHEAD` and `DODGE_MARGIN`.
+- **Validation:** every level, authored or generated, also goes through the game's `validateLevel`. A hard error or any soft warning fails it, since the game would refuse the file or hide the daily card.
+- **Daily sweep:** 182 consecutive keys from `2026-10-19` (a Monday), each generated twice (the two must serialize identically) and judged like an authored level. The chunk library must be unchanged afterwards. The sweep prints one row per difficulty (days, passes, crowd-at-boss range, min survivors, min boss TTK) and a total row, and any failing day fails the run.
 - **Formatting:** `toFixed(1)` becomes `ToString("F1", CultureInfo.InvariantCulture)`. A device locale with decimal commas will otherwise break it. `padEnd` becomes `PadRight`. Write UTF-8, because the output contains `§ — → ✗`.
 
 When a rule or number changes on purpose, re-run the sim in both codebases and update the golden in the same commit.
@@ -221,3 +232,97 @@ When a rule or number changes on purpose, re-run the sim in both codebases and u
   - The first gate shows ×3 on screen-left and +12 on screen-right.
   - The opening coin trail (`x: -2.2`) runs on screen-**right**.
   - The first enemy crowd (`x: 1.4`) is screen-**left**.
+- [ ] Every segment with `motion` gets `phaseUnity = frac(phase + 0.5)` next to `xUnity = -x` (§2), and a level-5 moving wall sweeps toward the same screen side as in the browser.
+- [ ] The daily level is generated in the authored frame and converted afterwards; the same date key builds the same level on web and device.
+
+## 8. Phase G mechanics: Verbatim rules
+
+Port these line by line, in `double`, with the names unchanged. The balance sim calls them (§6).
+
+**Run clock.** `runTime` resets to 0 in `StartRun` and advances by the time-scaled `dt` as the first statement of the simulation step. It stands still whenever the step doesn't run: paused, under an ad, on LOSE. It keeps counting through a revive. Drive it from the same scaled delta as the step, never from `Time.time`.
+
+**Motion** (`Core/Motion`):
+
+```
+motionX(baseX, m, t) = (m == null || m.amp == 0) ? baseX
+                     : baseX + m.amp * Math.Sin(2 * Math.PI * (t / m.period + m.phase))   // phase ?? 0
+```
+
+- Allowed on `barricade`, `enemy_crowd`, `coin_pickup`, `crowd_pickup` and `blade`. Validation rejects it anywhere else, and rejects `amp < 0`, `period <= 0` or a non-finite `phase`.
+- Once per step, after Formation and before Combat, call `track(runTime)` on every barricade, enemy, pickup and blade. That includes dead and passed ones, which keep moving on screen; no rule reads their x. Level build also poses everything at `t = 0`.
+- Targeting, lane overlap, enemy return fire, the ram test, the pickup collect test and the blade cut all read the **current** x.
+- Use `Math.Sin` (double), not `Mathf.Sin`.
+
+**Blade cut** (`{ z, x, width, kill, motion? }`, `width > 0`, `0 < kill <= 1`). On the first step where the crowd centroid's z reaches the blade's z, after that step's barricade rams:
+
+```
+h       = crowdHalf()                     // recomputed here: a ram this step may have shrunk the formation
+bx      = blade.x                         // current, from track()
+overlap = max(0, min(cx + h, bx + width/2) - max(cx - h, bx - width/2))
+frac    = overlap / (2 * h)
+lost    = frac > 0 ? ceil(count * kill * frac) : 0      // crowd.Kill(lost)
+```
+
+Then set `passed = true`. The blade has no further effect. It is indestructible and never a bullet target.
+
+**Boss crossfire.** The config keys are `crossfireGapHalf` 1.1, `crossfireTelegraphScale` 1.15 and `crossfireHitScale` 0.8.
+
+- **Telegraph.** `rollCenter(crossfireGapHalf)` puts the safe gap's centre `g` in `[minX + gh, maxX - gh]`, using the same re-roll-near-the-previous-centre rule as a sweep band. Sweeps and gaps share that previous centre. The telegraph lasts `lerp(telegraphTime, telegraphTimeMin, hurt) · crossfireTelegraphScale`.
+- **Danger.** Danger planes cover `[minX, g - gh]` and `[g + gh, maxX]`, and the safe lane is outlined green.
+- **Resolve:**
+
+```
+inGap       = max(0, min(cx + h, g + gh) - max(cx - h, g - gh))
+overlapFrac = (2h - inGap) / (2h)
+frac        = hitFraction * crossfireHitScale * overlapFrac
+lost        = ceil(count * frac)                         // applied like every boss hit
+```
+
+**Tints.** Sweep `#ff3b30`, slam `#ff8a3d`, crossfire `#d04dff`, safe lane `#5ce06a`, blade teeth `#ff3b30`. Red always means a threat. Keep the crossfire violet so it never reads as a sweep.
+
+## 9. Daily challenge generator: Verbatim
+
+The same date key must build the same level on every device and platform. Otherwise a Unity player and a web player get different dailies, and the sim's sweep no longer describes either one. Port `src/data/LevelGenerator.ts` line by line:
+
+- **Keys.**
+  - `dailyKey` is the player's **local** date: `DateTime.Now.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)`.
+  - Everything else is calendar arithmetic in UTC. `previousDayKey` is `new DateTime(y, m, d, 0, 0, 0, DateTimeKind.Utc).AddDays(-1)`. `dailyDifficulty` is `((int)date.DayOfWeek + 6) % 7 + 1`, giving Monday 1 … Sunday 7 (C# `DayOfWeek.Sunday` is 0, like JS `getUTCDay`).
+  - A key that isn't `YYYY-MM-DD`, or is an impossible date such as 2026-02-30, throws.
+- **Seed: FNV-1a, 32-bit**, over the key's UTF-16 code units: `uint h = 2166136261; foreach (char c in key) { h ^= c; h = unchecked(h * 16777619); }`. JS `Math.imul` followed by `>>> 0` is exactly a `uint` multiply mod 2^32.
+- **mulberry32**, in `uint` with `unchecked`. JS `>>>` is a logical shift, so shift a `uint`. `Math.imul` is a wrapping 32-bit multiply. `t + imul(...)` is a double sum that the following `^` wraps mod 2^32, which is what a `uint` add does.
+
+  ```
+  s += 0x6D2B79F5
+  t  = (s ^ (s >> 15)) * (s | 1)
+  t ^= t + (t ^ (t >> 7)) * (t | 61)
+  return (t ^ (t >> 14)) / 4294967296.0          // double in [0, 1)
+  ```
+
+- **The draw order is part of the contract.** There is one rng stream, consumed in this order:
+  1. The opener pick.
+  2. `owedFrom`.
+  3. For each chunk slot, one tier draw, then at most one pick. A `pickFrom` that finds nothing draws nothing.
+  4. The boss attack set.
+
+  One extra or missing `rng()` shifts every pick after it.
+- **Picks.**
+  - `pickIndex(n) = min(n - 1, floor(rng() * n))`.
+  - `drawTier` subtracts the tier weights in turn from `rng() * total`.
+  - Slot 0 never draws tier 3; a tier-3 draw there becomes tier 2.
+  - Candidate lists keep library order: filter them, never sort.
+  - Openers are the chunks whose id starts with `open_`.
+- **Stable sort.** Each chunk's segments are cloned, then sorted by z with JS's stable sort. C# `List.Sort` is unstable. Use LINQ `OrderBy` (stable; generation runs once per tap, so the allocation doesn't matter) or an insertion sort.
+- **Rounding.** `roundTo(v, step) = round(v / step) · step` and the phase's `round(p · 10000) / 10000` are JS rounds, so use `Math.Floor(x + 0.5)` (§1). The phase wrap `((p % 1) + 1) % 1` behaves the same in C#, whose double `%` matches JS. `Projection` (`fight`, `hpScale`, `sizeScale`) uses `Math.Pow` in double.
+- **Output and purity.**
+  - `id = int.Parse(key without dashes)` and `length = finishZ + 12`.
+  - Clone every segment, including `left`, `right`, `motion`, `attacks` and `multiplierLanes`. The library is shared and must come out unchanged.
+  - Run the result through `validateLevel`. Zero hard errors is part of the contract.
+- **Tables.** `CHUNK_COUNT`, `TIER_WEIGHTS`, `MIN_DOUBLERS`/`MAX_DOUBLERS`, `FORWARD_SPEED`, `THREAT_SCALE`, `BOSS_SECONDS`, `BOSS_ATTACKS` and `FINISH_LANES` are tuned against the sim's daily sweep. Copy them exactly; never retune them in one codebase only.
+- **Runtime rules (GameManager).**
+  - **Run setup.** Generate the level when PLAY DAILY is tapped, from the tap's local date key, and keep that key for the whole run, so a run past midnight keeps its day. The run uses the player's upgrades and skin and 0 wraps, and never reads or writes `currentLevel`.
+  - **Recording.** Every run end calls `RecordDailyResult(key, peak)`. A win also calls `RecordDailyClear(key, PreviousDayKey(key), peak)`. It is a first clear only when `key` is after `lastClearKey` (or there is none), so a clock set back, or a flight west across midnight, never pays a day twice or resets the streak, and `lastClearKey` never moves backwards. The menu card shows CLEARED on the same rule.
+  - **Stale card.** The menu rebuilds itself when the local date key changes: on resume from the background, and on a 30 s check while the bare menu is up (not under the shop, settings or an ad).
+  - **Payout.** A first clear pays `bonusCoins + streakBonus · min(streak, streakCap)` on top of the level coins. The ×2 ad doubles only the level coins.
+  - **After the win.** The clear calls `AdGate.OnLevelComplete`, then CONTINUE returns to the menu.
+  - **On a loss.** The lose screen offers RETRY (same level), REVIVE and MENU.
+- **Port check.** The C# port is right when its sweep prints the same daily table as the TS sim.

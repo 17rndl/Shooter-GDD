@@ -1,0 +1,57 @@
+{
+  "id": 5,
+  "length": 342,
+  "forwardSpeed": 9.25,
+  "segments": [
+    { "z": 24, "type": "gate_pair",
+      "left":  { "op": "add", "value": 24 },
+      "right": { "op": "mul", "value": 4 } },
+
+    { "z": 40, "type": "barricade", "x": 1.3, "hp": 110, "width": 2.0 },
+
+    { "z": 48, "type": "coin_pickup", "x": 0.0, "value": 15,
+      "motion": { "amp": 1.5, "period": 3.0, "phase": 0.590 } },
+    { "z": 54, "type": "coin_pickup", "x": 0.0, "value": 15,
+      "motion": { "amp": 1.5, "period": 3.0, "phase": 0.440 } },
+    { "z": 60, "type": "coin_pickup", "x": 0.0, "value": 15,
+      "motion": { "amp": 1.5, "period": 3.0, "phase": 0.290 } },
+    { "z": 66, "type": "coin_pickup", "x": 0.0, "value": 15,
+      "motion": { "amp": 1.5, "period": 3.0, "phase": 0.140 } },
+    { "z": 76, "type": "crowd_pickup", "x": 0.0, "value": 18,
+      "motion": { "amp": 1.6, "period": 3.0, "phase": 0.890 } },
+
+    { "z": 92, "type": "gate_pair",
+      "left":  { "op": "mul", "value": 2 },
+      "right": { "op": "sub", "value": 10 } },
+
+    { "z": 116, "type": "blade", "x": -1.4, "width": 1.8, "kill": 0.45 },
+
+    { "z": 140, "type": "enemy_crowd", "x": 1.2, "count": 40, "fireRate": 5.0 },
+    { "z": 148, "type": "crowd_pickup", "x": -1.8, "value": 25 },
+
+    { "z": 168, "type": "objective_node", "x": 1.3, "hp": 320, "reward": 40 },
+
+    { "z": 194, "type": "barricade", "x": 0.0, "hp": 300, "width": 2.0,
+      "motion": { "amp": 1.2, "period": 3.6 } },
+
+    { "z": 216, "type": "barricade", "x": 1.5, "hp": 300, "width": 1.8 },
+    { "z": 220, "type": "gate_pair",
+      "left":  { "op": "add", "value": 30 },
+      "right": { "op": "div", "value": 3 },
+      "tickable": true, "tickPerHit": 1 },
+
+    { "z": 246, "type": "enemy_crowd", "x": -1.6, "count": 42, "fireRate": 6.5 },
+    { "z": 246, "type": "enemy_crowd", "x": 1.6, "count": 42, "fireRate": 6.5 },
+    { "z": 256, "type": "crowd_pickup", "x": 0.0, "value": 50 },
+
+    { "z": 272, "type": "barricade", "x": 0.0, "hp": 720, "width": 2.6 },
+
+    { "z": 288, "type": "gate_pair",
+      "left":  { "op": "add", "value": 50 },
+      "right": { "op": "mul", "value": 2 } },
+
+    { "z": 312, "type": "boss", "hp": 13300, "attacks": ["slam", "sweep_fire"] },
+
+    { "z": 330, "type": "finish", "multiplierLanes": [2, 3, 5] }
+  ]
+}

@@ -1,7 +1,8 @@
-import type { GraphicsMode, SaveData } from '../data/types';
+import type { DailySave, GraphicsMode, SaveData } from '../data/types';
 
 const KEY = 'csr_save_v1';
 const DEFAULT_SKIN = 'default';
+const DAY_KEY = /^\d{4}-\d{2}-\d{2}$/;
 
 const DEFAULT_SAVE: SaveData = {
   currentLevel: 1,
@@ -12,6 +13,7 @@ const DEFAULT_SAVE: SaveData = {
   ownedSkins: [DEFAULT_SKIN],
   equippedSkin: DEFAULT_SKIN,
   removeAds: false,
+  daily: { key: '', best: 0, cleared: false, streak: 0, lastClearKey: '' },
 };
 
 function wholeAtLeast(v: unknown, min: number, fallback: number): number {
@@ -31,9 +33,35 @@ function record(v: unknown): Record<string, unknown> {
   return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
 }
 
+function dayKey(v: unknown): string {
+  return typeof v === 'string' && DAY_KEY.test(v) ? v : '';
+}
+
+/** Day `key` has nothing left to pay: it is the last clear or before it (YYYY-MM-DD sorts as dates). */
+function paidDay(key: string, lastClearKey: string): boolean {
+  return key !== '' && lastClearKey !== '' && key <= lastClearKey;
+}
+
+/**
+ * `cleared` is derived from the keys, never trusted, and a streak needs a clear
+ * to end on, so a hand-edited save can't claim either without the other.
+ */
+function sanitizeDaily(raw: unknown): DailySave {
+  const r = record(raw);
+  const key = dayKey(r.key);
+  const lastClearKey = dayKey(r.lastClearKey);
+  return {
+    key,
+    best: key ? wholeAtLeast(r.best, 0, 0) : 0,
+    cleared: paidDay(key, lastClearKey),
+    streak: lastClearKey ? wholeAtLeast(r.streak, 0, 0) : 0,
+    lastClearKey,
+  };
+}
+
 /**
  * Any parsed blob → a well-formed SaveData. Old saves predate music, skins,
- * removeAds and the graphics mode, so missing fields take defaults; a
+ * removeAds, the graphics mode and the daily challenge, so missing fields take defaults; a
  * hand-edited or corrupt save can never hand the game a NaN balance, a level
  * below 1, an unowned skin or an unknown graphics mode.
  * Skin ids are not checked against the catalog here (the game resolves them).
@@ -73,6 +101,7 @@ export function sanitizeSave(raw: unknown): SaveData {
     ownedSkins: owned,
     equippedSkin: equipped,
     removeAds: flag(r.removeAds, d.removeAds),
+    daily: sanitizeDaily(r.daily),
   };
 }
 
@@ -143,6 +172,43 @@ export class SaveService {
   setRemoveAds(on: boolean): void {
     this.data.removeAds = on;
     this.save();
+  }
+
+  /** A new day's key starts a fresh best; the peak only ever raises it. */
+  private dailyFor(key: string, peak: number): DailySave {
+    const d = this.data.daily;
+    if (d.key !== key) {
+      d.key = key;
+      d.best = 0;
+      d.cleared = paidDay(key, d.lastClearKey);
+    }
+    if (Number.isFinite(peak)) d.best = Math.max(d.best, Math.floor(peak));
+    return d;
+  }
+
+  /** Any daily run's end (win, loss or quit): keeps the day's best peak. */
+  recordDailyResult(key: string, peak: number): void {
+    this.dailyFor(key, peak);
+    this.save();
+  }
+
+  /**
+   * A daily win. Only the first clear of `key` extends the streak: it continues
+   * when the previous clear was on `prevKey` (the day before), else restarts at 1.
+   * A day on or before lastClearKey is never a first clear, so a clock set back
+   * (or a flight west over midnight) can't pay a day twice or reset the streak,
+   * and lastClearKey never moves backwards.
+   */
+  recordDailyClear(key: string, prevKey: string, peak: number): { firstClear: boolean; streak: number } {
+    const d = this.dailyFor(key, peak);
+    const firstClear = !paidDay(key, d.lastClearKey);
+    if (firstClear) {
+      d.streak = d.lastClearKey === prevKey ? d.streak + 1 : 1;
+      d.lastClearKey = key;
+    }
+    d.cleared = true;
+    this.save();
+    return { firstClear, streak: d.streak };
   }
 
   reset(): void {

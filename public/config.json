@@ -35,7 +35,10 @@
     "chipFractionPerSecond": 0.01,
     "chipMinUnitsPerSecond": 1,
     "slamTelegraphScale": 0.8,
-    "slamHitScale": 1.25
+    "slamHitScale": 1.25,
+    "crossfireGapHalf": 1.1,
+    "crossfireTelegraphScale": 1.15,
+    "crossfireHitScale": 0.8
   },
   "gates": { "damagePerTick": 12, "mulCap": 4, "addCap": 99, "decayFloor": 1 },
   "barricade": { "ramFactor": 0.8 },
@@ -60,5 +63,6 @@
     "rewardedTimeoutSec": 30,
     "stubLatencyMs": 600,
     "bonusCrowd": 15
-  }
+  },
+  "daily": { "bonusCoins": 250, "streakBonus": 50, "streakCap": 7 }
 }

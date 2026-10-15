@@ -80,8 +80,9 @@ src/
   main.ts                  boot (immersive → GameManager → config → level manifest), failed-boot screen
   core/GameManager.ts      state machine (MENU→PLAYING⇄BOSS→WIN→REWARD / LOSE→revive), pause,
                            ad / lifecycle / back-button hooks, quality + context-loss wiring,
-                           system tick order
+                           system tick order, run clock, campaign | daily run mode
   core/WorldSpace.ts       WORLD_X_SIGN + screenToWorldX: the one place that knows the X mirror
+  core/Motion.ts           MotionDef + motionX: the sway rule shared with the balance sim (pure)
   platform/Platform.ts     isNative / platform ('android' | 'ios' | 'web'), enterImmersive()
   platform/AppLifecycle.ts one deduped hidden / visible signal + back button (Escape on the web)
   platform/NativeHaptics.ts  @capacitor/haptics service; createHaptics() picks native or web
@@ -91,9 +92,11 @@ src/
   crowd/                   CrowdController (count + formation + DPS), UnitInstancer (GPU-instanced units)
   combat/BulletPool.ts     capped pooled visual tracers (tinted by the equipped skin)
   combat/ParticlePool.ts   pooled sparks, death pops
-  entities/                GatePair, Barricade, EnemyCrowd, ObjectiveNode, Boss, Finish, Pickup
+  entities/                GatePair, Barricade, EnemyCrowd, ObjectiveNode, Boss (sweep / slam /
+                           crossfire), Finish, Pickup, Blade; the movers have track(runTime)
   world/Track.ts           ground, rails, depth cues
-  ui/HUD.ts                DOM overlay (count, coins, progress, popups, boss bar, overlays, gear)
+  ui/HUD.ts                DOM overlay (count, coins, progress, popups, boss bar, overlays, gear,
+                           daily challenge card, daily reward line)
   ui/ShopPanel.ts          shop: UPGRADES (coin sink) / SKINS (cosmetic) / STORE (IAP)
   ui/SettingsPanel.ts      settings sheet, doubles as the in-run pause menu
   services/SaveService.ts      localStorage save + sanitize/migrate (sanitizeSave)
@@ -104,14 +107,18 @@ src/
   data/types.ts            config / level / save contracts
   data/ConfigLoader.ts     loadConfig + validateConfig (missing sections fail the boot)
   data/LevelRepository.ts  ILevelRepository, manifest wrap + cache, validateLevel
+  data/LevelGenerator.ts   daily challenge: dailyKey, weekday difficulty, FNV-1a seed,
+                           mulberry32, generateDaily (pure, Node-loadable)
   util/                    MathUtil (phyllotaxis, damp), Label (canvas-texture number plates)
 public/
-  config.json              all tuning numbers (GDD §14.1 / §15), skins, ad cadence
+  config.json              all tuning numbers (GDD §14.1 / §15), skins, ad cadence, daily payout
   levels/index.json        level manifest: {"levels": [...]} in play order
-  levels/level_00{1,2,3}.json   JSON-driven levels, scaling difficulty (GDD §14.2)
+  levels/level_001..012.json    JSON-driven levels, scaling difficulty (GDD §14.2)
+  levels/chunks.json       hand-authored chunks the daily challenge is stitched from
   manifest.webmanifest     PWA manifest (fullscreen, portrait, navy theme)
   icons/                   PWA icons (rendered from resources/icon.svg)
-scripts/balance-sim.mjs    balance regression test (`npm run balance`)
+scripts/balance-sim.mjs    balance regression test (`npm run balance`): 12 levels + daily sweep
+scripts/check-balance.mjs  CI gate: sim output vs scripts/balance-golden.txt (`npm run balance:check`)
 capacitor.config.ts        app id / name, webDir 'dist', native plugin config
 android/                   Capacitor Android project (MainActivity: portrait, immersive, screen on)
 resources/                 icon.svg master + render-icons.mjs (headless Edge rasterizer)
@@ -120,9 +127,10 @@ docs/UNITY_PORT.md         Unity port guide
 ```
 
 Every tuning value lives in `config.json`; the level is data in `level_001.json` — edit and
-reload, no recompile. Add a level by dropping in `level_00N.json` and listing it in
+reload, no recompile. Add a level by dropping in `level_0NN.json` and listing it in
 `levels/index.json`; it is validated on load (a broken file fails with its name, segment
-index and the bad field).
+index and the bad field). Run `npm run balance` after any level, chunk or config edit, and
+refresh the golden (`node scripts/check-balance.mjs --update`) only once it passes.
 
 ### Steering / camera note
 The chase camera looks down +Z, which mirrors world-X on screen (world +X is screen-left in
@@ -195,6 +203,106 @@ beat of the arc a physical signal, all pooled and allocation-free:
   caches, and validates every file; `ConfigLoader` fails the boot on a missing config section.
   [`docs/UNITY_PORT.md`](docs/UNITY_PORT.md) maps every file to its Unity home and lists the
   JS-vs-C# numeric traps the balance sim depends on.
+
+### Content pass 2 — new mechanics, levels 4–12, a daily challenge
+
+Three new mechanics, nine new levels and a seeded daily level. Everything is data plus a few pure
+rules that the balance sim mirrors and checks.
+
+- **Run clock.** `runTime` counts the seconds simulated since the run started. It advances by
+  the same time-scaled `dt` as `simulate()`, so it stops while the game is paused, while an ad is
+  up and on LOSE, and keeps running through a revive. Until the boss standoff, the crowd is at
+  `z = runSpeed · runTime`, in the game and in the sim alike.
+- **Motion** (`src/core/Motion.ts`). An optional `motion: { amp, period, phase? }` on a
+  `barricade`, `enemy_crowd`, `coin_pickup`, `crowd_pickup` or `blade` makes it sway across the
+  track: `x(t) = x + amp·sin(2π·(t/period + phase))`. GameManager moves every prop to its
+  `runTime` position once per step, before combat and collisions. Targeting, lane overlap,
+  enemy return fire, ram tests, pickup collection and blade cuts all use that current x.
+  `motion` on any other segment type fails validation.
+- **Blade** (`'blade'`: `{ z, x, width, kill, motion? }`). A spinning saw on a rail across the
+  track: a dark steel disc with red teeth. It can't be shot or broken, only dodged. Its red glow
+  brightens over the last ~14 u of your approach. On the step your crowd reaches its z, it cuts
+  `ceil(count · kill · frac)` units, where `frac` is the share of your formation's width
+  (`crowdHalf`) that overlaps the saw at that moment. A graze costs a little, a dead-centre run
+  costs `kill` of the crowd, and a clean dodge costs nothing.
+- **Boss crossfire** (`attacks: [..., 'crossfire']`, violet telegraph `0xd04dff`). The opposite
+  of a sweep: the whole track is on fire except one safe gap, `2·crossfireGapHalf` wide and
+  outlined in green. It uses the same random roll and anti-repeat rule as a sweep band, and its
+  telegraph lasts `crossfireTelegraphScale` times as long. On resolve it hits
+  `hitFraction · crossfireHitScale` scaled by the share of the formation outside the gap. Crowds
+  past about 23 units are wider than the gap, so every crossfire costs something: this is the
+  attack that keeps a big crowd honest. Sweep is red, slam orange, crossfire violet.
+
+**Levels 4–12** extend the curve. Each level is faster than the one before (9.0 → 11.0 u/s),
+has a bigger boss and moves more of its props. Numbers are from `npm run balance` (BEST path):
+
+| Level | Speed | Crowd at boss | Boss TTK | Survivors | Boss cycle | New beats |
+|---|---|---|---|---|---|---|
+| 4 | 9.0 | 538 | 8.0 s | 92% | sweep + slam | first blades, one sweeping |
+| 5 | 9.25 | 612 | 8.3 s | 89% | slam + sweep | moving walls and runaway pickups |
+| 6 | 9.5 | 676 | 8.8 s | 88% | slam ×2 + sweep | milestone: a double slam, ×6 finish lane; a sweeping saw that clips |
+| 7 | 9.75 | 738 | 8.9 s | 85% | sweep + crossfire | first crossfire (once per cycle); three saws |
+| 8 | 10.0 | 816 | 9.0 s | 82% | slam + crossfire + sweep | moving squads |
+| 9 | 10.25 | 888 | 9.6 s | 79% | crossfire ×2 + sweep + slam | milestone: back-to-back crossfire; four saws |
+| 10 | 10.5 | 946 | 9.7 s | 76% | slam + crossfire ×2 + sweep | pickup chains between fights; a swaying mega-wall |
+| 11 | 10.75 | 1055 | 10.2 s | 73% | crossfire-heavy, 5-attack cycle | five saws, 13 moving props |
+| 12 | 11.0 | 1263 | 10.7 s | 70% | crossfire ×3 + slam + sweep | finale: six saws |
+
+Boss TTK never drops from one level to the next and survivors fall steadily. Every level opens
+with something to shoot within a few seconds, every first wall can be shot down by the crowd the
+lesser opener door leaves, and each mega-wall is either breakable or dodgeable by a crowd well
+short of BEST's. Nothing stands between a dead boss and the finish line. The WORST path still
+dies early on every level, between z 40 and z 94. Levels 1–3 did not change: their sim rows and
+BEST traces are byte-identical to the pre-pass golden.
+
+**Daily challenge.** The menu shows a DAILY CHALLENGE card with the weekday, the difficulty as 1–7
+pips, your clear streak, today's best crowd and a ✓ CLEARED badge, plus a PLAY DAILY button that
+shows the bonus a first clear would pay.
+
+- **One level per local calendar day, the same on every device.** `src/data/LevelGenerator.ts`
+  builds it from the hand-authored chunks in `public/levels/chunks.json`: 27 chunks, segment z
+  relative to the chunk start. Every random pick comes from `mulberry32(seedFrom('YYYY-MM-DD'))`,
+  where `seedFrom` is FNV-1a. Each level is an opener chunk with a good gate, then 4–7 chunks
+  drawn by tier weight, then the boss and the finish. Chunk hp and squad sizes scale to the crowd
+  the BEST line is projected to carry at that point. Swaying props are re-phased so they reach the
+  crowd as their chunk was authored. The boss is sized to last a set number of seconds at the
+  difficulty.
+- **Difficulty follows the weekday: Monday 1 … Sunday 7.** Each step up raises the speed and the
+  share of tier-3 chunks, makes multiplier gates scarcer and the boss tougher, and adds crossfire
+  to the boss cycle from Thursday on.
+- **Generated when you tap PLAY DAILY**, so a run that crosses midnight keeps its day's level. It
+  uses your upgrades and skin, but never reads or advances `currentLevel` and never gets
+  endless-wrap scaling. If `chunks.json` fails to load, or can't build today's level, the card is
+  hidden. The game itself still boots.
+- **Payout.** Every clear pays the normal level coins, and the ×2 ad doubles those. The **first
+  clear of the day** also pays `daily.bonusCoins + daily.streakBonus · min(streak, streakCap)`,
+  which is 250 + 50 per streak day up to 7 (600 at most). The streak goes up when yesterday was
+  also cleared and restarts at 1 otherwise. Clearing the same day again pays only the normal
+  coins. The reward screen shows the bonus and the streak. CONTINUE goes back to the menu, and
+  the clear still counts toward the interstitial cadence.
+- **Losing.** RETRY replays the same day's level, REVIVE (AD) works as usual, and MENU leaves.
+  Every run end, whether a win, a loss or a quit, keeps that day's best crowd in
+  `save.daily` (`{ key, best, cleared, streak, lastClearKey }`). A day on or before the last
+  clear never pays again, so setting the clock back (or flying west across midnight) can't
+  re-pay a day or reset the streak. The menu card rebuilds itself when the date changes, both
+  while it is open and when the app comes back from the background.
+- **Sim coverage.** The sim's **daily sweep** generates 182 consecutive days starting Monday
+  2026-10-19 and holds each one to the §15 rule. It also fails if `generateDaily` is not
+  deterministic, mutates the chunk library, or builds a level that the game's `validateLevel`
+  rejects or warns about (authored levels are checked the same way). It prints one line per difficulty:
+
+  | Difficulty | Crowd at boss | Min survivors | Min boss TTK |
+  |---|---|---|---|
+  | 1 (Mon) | 110–756 | 90% | 7.1 s |
+  | 2 (Tue) | 106–486 | 89% | 7.6 s |
+  | 3 (Wed) | 102–360 | 87% | 6.7 s |
+  | 4 (Thu) | 75–400 | 78% | 7.1 s |
+  | 5 (Fri) | 64–247 | 76% | 8.1 s |
+  | 6 (Sat) | 86–258 | 73% | 8.8 s |
+  | 7 (Sun) | 77–323 | 68% | 10.2 s |
+
+`npm run balance:check` compares the sim's whole report (all 12 levels and the daily sweep)
+with `scripts/balance-golden.txt`.
 
 ## Android app (Capacitor)
 
@@ -321,8 +429,10 @@ contact sheet.
 ## Dev/debug
 `window.__game` is exposed in the browser console: `__game.debug()` dumps live state (now
 including `paused`, `adOpen`, `adBusy`, `skin`, `music`, `settings`, `removeAds`,
-`levelCount`, and from Phase F `platform`, `tier`, `graphics`, `glLost`),
-`__game.debugSteer(0..1)` drives the steer target. Harmless; strip for production.
+`levelCount`, from Phase F `platform`, `tier`, `graphics`, `glLost`, and from Phase G
+`runTime`, `bladeLosses`, `bossAttack`, `mode` (`campaign` / `daily`), `dailyRunKey`,
+`dailyAvailable` and the saved `daily` block), `__game.debugSteer(0..1)` drives the steer
+target. Harmless; strip for production.
 
 - **Escape is back** on the web, exactly like Android's back button (closes Settings or the
   Shop, pauses a live run, does nothing on the menu and the result screens); it is ignored while

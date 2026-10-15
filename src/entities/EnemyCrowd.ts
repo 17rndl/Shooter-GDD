@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { UnitInstancer } from '../crowd/UnitInstancer';
 import { NumberPlate } from '../util/Label';
 import { phyllotaxis, type Vec2 } from '../util/MathUtil';
+import { motionX, type MotionDef } from '../core/Motion';
 import type { GameConfig, Segment } from '../data/types';
 
 const ENEMY_COLOR = 0xff8a3d;
@@ -11,7 +12,9 @@ const ENEMY_COLOR = 0xff8a3d;
 
 export class EnemyCrowd {
   readonly group = new THREE.Group();
-  readonly x: number;
+  /** Authored centre. `x` is where the squad stands now; they differ only with motion. */
+  readonly baseX: number;
+  x: number;
   readonly z: number;
   readonly fireRate: number;
   count: number;
@@ -26,10 +29,13 @@ export class EnemyCrowd {
   private scratch: Vec2 = { x: 0, z: 0 };
   private punch = 0;
   private readonly cfg: GameConfig;
+  private readonly motion: MotionDef | undefined;
 
   constructor(seg: Segment, cfg: GameConfig, scene: THREE.Scene) {
     this.cfg = cfg;
-    this.x = seg.x ?? 0;
+    this.baseX = seg.x ?? 0;
+    this.x = this.baseX;
+    this.motion = seg.motion;
     this.z = seg.z;
     this.count = seg.count ?? 10;
     this.fireRate = seg.fireRate ?? 4;
@@ -50,6 +56,17 @@ export class EnemyCrowd {
     this.plate.mesh.position.set(this.x, 1.6, this.z);
     this.group.add(this.plate.mesh);
     scene.add(this.group);
+  }
+
+  /**
+   * Moves the squad to where its sweep puts it at run time `t`. update() lays
+   * the units out around `x` every frame (and pivots the punch on it), so only
+   * the plate, built at a fixed spot, needs moving here.
+   */
+  track(t: number): void {
+    if (!this.motion) return;
+    this.x = motionX(this.baseX, this.motion, t);
+    this.plate.mesh.position.x = this.x;
   }
 
   private get visible(): number {

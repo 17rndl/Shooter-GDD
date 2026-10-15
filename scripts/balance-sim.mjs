@@ -6,12 +6,18 @@
 // the boss) — and asserts the GDD rule: BEST beats the boss with margin, WORST
 // dies before the finish.
 //
-// The formulas below MUST mirror src/ (WorldSpace, CrowdController, EnemyCrowd, GatePair,
-// Boss, Pickup, GameManager). If a mechanic changes there, change it here too.
+// The formulas below MUST mirror src/ (WorldSpace, Motion, CrowdController, EnemyCrowd,
+// GatePair, Blade, Boss, Pickup, GameManager). If a mechanic changes there, change it here too.
+//
+// After the authored levels it sweeps the daily challenge: 182 consecutive days of
+// generateDaily (src/data/LevelGenerator.ts), each held to the same rule. Every level,
+// authored or generated, must also pass the game's own validateLevel without a warning.
+// BALANCE_LEVEL_DIR=<dir> replays the levels in <dir> instead of public/levels.
 // ---------------------------------------------------------------------------
-import { readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { validateLevel } from '../src/data/LevelRepository.ts';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const DT = 1 / 60;
@@ -66,6 +72,10 @@ const BOSS = {
   // slam keys; fallbacks are the shipped contract values
   slamTelegraphScale: num(rawBoss.slamTelegraphScale, 0.8),
   slamHitScale: num(rawBoss.slamHitScale, 1.25),
+  // crossfire keys; fallbacks are the shipped contract values
+  crossfireGapHalf: num(rawBoss.crossfireGapHalf, 1.1),
+  crossfireTelegraphScale: num(rawBoss.crossfireTelegraphScale, 1.15),
+  crossfireHitScale: num(rawBoss.crossfireHitScale, 0.8),
 };
 const GATES = {
   damagePerTick: num(rawGates.damagePerTick, 12),
@@ -79,7 +89,7 @@ const ENGAGE = COMBAT.engageRange;
 
 // Attack names Boss understands. Anything else in a level's `attacks` array is
 // skipped, exactly as the entity does, and an empty result falls back to sweep.
-const BOSS_ATTACKS = new Set(['sweep_fire', 'slam']);
+const BOSS_ATTACKS = new Set(['sweep_fire', 'slam', 'crossfire']);
 
 // Boss.rollBand picks a uniformly random band centre in [minX+bandHalf, maxX-bandHalf]
 // and re-rolls when it lands within 1.0 of the previous one. The harness must stay
@@ -87,6 +97,9 @@ const BOSS_ATTACKS = new Set(['sweep_fire', 'slam']);
 // never repeats a neighbour, and approximates the game's random rolls closely enough
 // to price the sweep. Change it only alongside boss.bandHalf / track.minX / maxX.
 const BAND_SEQUENCE = [-1.5, 0.75, -0.25, 1.5, 0, -1.0, 1.25];
+// The crossfire's safe-gap centres, standing in for its random roll in
+// [minX+crossfireGapHalf, maxX-crossfireGapHalf] the same way.
+const GAP_SEQUENCE = [0.8, -1.2, 0.0, 1.6, -0.4, -1.7, 1.1];
 
 // Mirrors src/core/WorldSpace.ts: world +X renders on screen-left (right-handed
 // Three.js, camera looking +Z), so screen fractions flip before becoming world X.
@@ -98,6 +111,12 @@ const screenToWorldX = (t01, minX, maxX) =>
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
 const lerp = (a, b, t) => a + (b - a) * t;
 const damp = (cur, target, smoothing, dt) => cur + (target - cur) * (1 - Math.exp(-smoothing * dt));
+
+/** Mirrors src/core/Motion.ts motionX: where a swaying prop stands at run clock t. */
+function motionX(baseX, m, t) {
+  if (!m || m.amp === 0) return baseX;
+  return baseX + m.amp * Math.sin(2 * Math.PI * (t / m.period + (m.phase ?? 0)));
+}
 
 const playerDPS = (c) =>
   c <= 0 ? 0 : Math.pow(c, COMBAT.dpsExponent) * COMBAT.perUnitDamage * COMBAT.fireRate;
@@ -132,13 +151,28 @@ const tickedValue = (half, ticks, tickPerHit) => {
   return Math.max(GATES.decayFloor, half.value - step);
 };
 
+/** Width of a formation centred at x (half-width h) that a saw centred at bx covers. */
+const bladeOverlap = (x, h, bx, width) =>
+  Math.max(0, Math.min(x + h, bx + width / 2) - Math.max(x - h, bx - width / 2));
+
 // ---------------------------------------------------------------- world build
 function buildWorld(level) {
   const w = {
-    gates: [], barricades: [], enemies: [], objectives: [], pickups: [], boss: null, finish: null,
+    gates: [], barricades: [], enemies: [], objectives: [], pickups: [], blades: [],
+    movers: [], boss: null, finish: null,
   };
   const { minX, maxX } = TRACK;
   const gateHalfW = (maxX - minX) / 4;
+  // Swaying props keep their authored x as baseX and are re-placed every step;
+  // like GameManager.buildLevel they start posed at clock 0.
+  const sway = (seg, ent) => {
+    ent.baseX = seg.x ?? 0;
+    ent.motion = seg.motion;
+    ent.amp = seg.motion ? seg.motion.amp : 0;
+    ent.x = motionX(ent.baseX, ent.motion, 0);
+    if (ent.motion) w.movers.push(ent);
+    return ent;
+  };
 
   for (const seg of level.segments) {
     switch (seg.type) {
@@ -154,17 +188,25 @@ function buildWorld(level) {
         break;
       }
       case 'barricade':
-        w.barricades.push({
-          x: seg.x ?? 0, z: seg.z, hp: seg.hp ?? 50,
+        w.barricades.push(sway(seg, {
+          z: seg.z, hp: seg.hp ?? 50,
           halfWidth: (seg.width ?? 2.0) / 2, alive: true, passed: false,
-        });
+        }));
         break;
       case 'enemy_crowd': {
         const count = seg.count ?? 10;
-        w.enemies.push({
-          x: seg.x ?? 0, z: seg.z, count, fireRate: seg.fireRate ?? 4,
+        w.enemies.push(sway(seg, {
+          z: seg.z, count, fireRate: seg.fireRate ?? 4,
           hp: count * COMBAT.enemyUnitHp, alive: true,
-        });
+        }));
+        break;
+      }
+      case 'blade': {
+        const bl = sway(seg, { z: seg.z, width: seg.width ?? 1.6, kill: seg.kill ?? 0.5, passed: false });
+        // the most the saw travels in one step: the crossing can land up to a
+        // step after the z / runSpeed the policy predicts it at
+        bl.stepTravel = bl.amp !== 0 ? Math.abs((2 * Math.PI * bl.amp) / bl.motion.period) * DT : 0;
+        w.blades.push(bl);
         break;
       }
       case 'objective_node':
@@ -175,10 +217,10 @@ function buildWorld(level) {
         break;
       case 'coin_pickup':
       case 'crowd_pickup':
-        w.pickups.push({
+        w.pickups.push(sway(seg, {
           kind: seg.type === 'crowd_pickup' ? 'crowd' : 'coin',
-          x: seg.x ?? 0, z: seg.z, value: seg.value ?? 10, taken: false,
-        });
+          z: seg.z, value: seg.value ?? 10, taken: false,
+        }));
         break;
       case 'boss': {
         const attacks = (Array.isArray(seg.attacks) ? seg.attacks : ['sweep_fire'])
@@ -228,6 +270,32 @@ function chooseHalf(gate, count, policy, dps, speed) {
   return best;
 }
 
+/**
+ * BEST's line past a saw predicted to cross at bx: hold the current line if it
+ * already clears, else the nearer side that leaves the least overlap (a wall,
+ * when a side is too tight to clear).
+ */
+function bladeDodgeX(bl, bx, h, cx) {
+  const clear = bl.width / 2 + h + DODGE_MARGIN + bl.stepTravel;
+  if (Math.abs(cx - bx) >= clear) return cx;
+  const lo = clamp(bx - clear, TRACK.minX, TRACK.maxX);
+  const hi = clamp(bx + clear, TRACK.minX, TRACK.maxX);
+  const oLo = bladeOverlap(lo, h, bx, bl.width);
+  const oHi = bladeOverlap(hi, h, bx, bl.width);
+  if (oLo !== oHi) return oLo < oHi ? lo : hi;
+  return Math.abs(lo - cx) <= Math.abs(hi - cx) ? lo : hi;
+}
+
+/** Where the policy stands for a crossfire with its safe gap at g. */
+function crossfireStandX(g, best) {
+  if (best) return g; // dead centre of the gap
+  // WORST plants itself in the middle of the wider danger plane
+  const gh = BOSS.crossfireGapHalf;
+  const loW = g - gh - TRACK.minX;
+  const hiW = TRACK.maxX - (g + gh);
+  return loW >= hiW ? (TRACK.minX + g - gh) / 2 : (g + gh + TRACK.maxX) / 2;
+}
+
 function hitGate(gate, i, damage) {
   if (!gate.tickable || gate.passed) return;
   const h = gate.halves[i];
@@ -256,16 +324,17 @@ function runPolicy(level, policy) {
   let bossTimer = BOSS.firstTelegraphDelay;
   let bossStart = -1;
   let bandIdx = 0;
+  let gapIdx = 0;
   let attackIdx = 0;
   let attackKind = 'sweep_fire';
-  let bandCenter = 0;
-  let prevBand = null; // band of the previous telegraph; null before the first
+  let bandCenter = 0; // a sweep/slam band's centre, or a crossfire's safe-gap centre
+  let parkX = 0; // where BEST stood for the last resolve; 0 before the first
   const cand = []; // hoisted: the in-lane targets this frame, mirrors findTargets
   const out = {
     policy, finished: false, stalled: false, death: null,
     crowdAtBoss: 0, bossTTK: 0, survivors: 0, bossKilled: false, finalCount: 0,
     sweeps: 0, sweepLoss: 0, picked: 0, trace: [],
-    attacks: w.boss ? w.boss.attacks.join('+') : '—',
+    attacks: w.boss ? w.boss.attacks : null,
   };
 
   const note = (s) => out.trace.push(s);
@@ -283,10 +352,15 @@ function runPolicy(level, policy) {
   };
 
   while (t < MAX_SIM_TIME) {
+    // The run clock once this step has advanced, i.e. GameManager.runTime when
+    // it re-places the movers (t += DT below rounds to exactly this value).
+    const now = t + DT;
     const dps = playerDPS(c);
     const laneH = laneHalf(c);
 
     // ---- policy: where do we want to be? -----------------------------------
+    // Movers are read at their last placed x, except where the policy commits to
+    // a crossing: there it predicts the x at z / runSpeed.
     let target = 0;
     let targetZ = Infinity;
     const want = (z, x) => { if (z < targetZ) { targetZ = z; target = x; } };
@@ -295,9 +369,10 @@ function runPolicy(level, policy) {
       if (!e.alive || cz > e.z + 3 || e.z - cz > ENGAGE + LOOKAHEAD) continue;
       let x = e.x;
       if (best) {
+        // a swaying squad is dodged from the wall clear of its whole sweep
         const need = laneH + enemyHalf(e.count) + DODGE_MARGIN;
-        const dLo = Math.abs(TRACK.minX - e.x);
-        const dHi = Math.abs(TRACK.maxX - e.x);
+        const dLo = Math.max(0, e.baseX - e.amp - TRACK.minX);
+        const dHi = Math.max(0, TRACK.maxX - (e.baseX + e.amp));
         if (Math.max(dLo, dHi) > need) x = dHi >= dLo ? TRACK.maxX : TRACK.minX;
       }
       want(e.z, x);
@@ -309,7 +384,8 @@ function runPolicy(level, policy) {
     }
     for (const b of w.barricades) {
       if (!b.alive || b.passed || b.z < cz || b.z - cz > ENGAGE + LOOKAHEAD) continue;
-      want(b.z, b.x);
+      // BEST keeps it in its lane to shoot it down; WORST lines up the ram
+      want(b.z, best ? b.x : motionX(b.baseX, b.motion, b.z / speed));
     }
     if (best) {
       for (const o of w.objectives) {
@@ -317,6 +393,19 @@ function runPolicy(level, policy) {
         if (o.plan === null) o.plan = o.reward > 0 && o.hp / Math.max(1e-6, dps) <= ENGAGE / speed;
         if (o.plan) want(o.z, o.x);
       }
+      // A static crowd pickup is banked by assumption (see the pickup pass); a
+      // swaying one has to be met where it will cross.
+      for (const p of w.pickups) {
+        if (p.taken || p.amp === 0 || p.kind !== 'crowd' || p.z < cz || p.z - cz > ENGAGE + LOOKAHEAD) continue;
+        want(p.z, clamp(motionX(p.baseX, p.motion, p.z / speed), TRACK.minX, TRACK.maxX));
+      }
+    }
+    for (const bl of w.blades) {
+      if (bl.passed || bl.z - cz > ENGAGE + LOOKAHEAD) continue;
+      const bx = motionX(bl.baseX, bl.motion, bl.z / speed);
+      // a close saw outranks the return fire of a squad the crowd has already passed
+      if (targetZ < cz && bl.z - cz <= LOOKAHEAD) targetZ = Infinity;
+      want(bl.z, best ? bladeDodgeX(bl, bx, crowdHalf(c), cx) : bx);
     }
     if (w.boss && w.boss.alive && targetZ === Infinity) target = 0; // stay in the boss's lane
 
@@ -332,6 +421,9 @@ function runPolicy(level, policy) {
       }
     }
     cx = clamp(damp(cx, target, CROWD.steerSmoothing, DT), TRACK.minX, TRACK.maxX);
+
+    // ---- movers: placed at the run clock before combat and collision -------
+    for (const m of w.movers) m.x = motionX(m.baseX, m.motion, now);
 
     // ---- enemy fire --------------------------------------------------------
     for (const e of w.enemies) {
@@ -425,48 +517,50 @@ function runPolicy(level, policy) {
           bossTimer = lerp(BOSS.telegraphTime, BOSS.telegraphTimeMin, 1 - frac);
           if (attackKind === 'slam') {
             // The band locks onto the crowd where it stands when the wind-up
-            // starts: BEST is parked at the wall farthest from the last band
-            // (it has been sitting there since that resolve), WORST at 0.
-            const startX = best ? (prevBand === null ? 0 : prevBand < 0 ? TRACK.maxX : TRACK.minX) : 0;
+            // starts: BEST is parked where it took the last resolve (the wall
+            // farthest from that band, or that crossfire's gap), WORST at 0.
+            const startX = best ? parkX : 0;
             bandCenter = clamp(startX, TRACK.minX + BOSS.bandHalf, TRACK.maxX - BOSS.bandHalf);
             bossTimer *= BOSS.slamTelegraphScale; // shorter fuse than a sweep
+          } else if (attackKind === 'crossfire') {
+            bandCenter = GAP_SEQUENCE[gapIdx++ % GAP_SEQUENCE.length];
+            bossTimer *= BOSS.crossfireTelegraphScale; // two planes to read: a longer fuse
           } else {
             bandCenter = BAND_SEQUENCE[bandIdx++ % BAND_SEQUENCE.length];
           }
         } else {
           // Mirrors Boss.update: the loss is the share of the formation's physical
-          // width the band covers. BEST runs for the wall farthest from the band
-          // (the game clamps the centroid to the track); WORST just stands still.
-          const sweepX = best ? (bandCenter < 0 ? TRACK.maxX : TRACK.minX) : 0;
+          // width the danger covers. Against a band BEST runs for the wall farthest
+          // from it (the game clamps the centroid to the track) and WORST just
+          // stands still; a crossfire covers everything but its gap.
           const ch = crowdHalf(c);
-          const lo = Math.max(sweepX - ch, bandCenter - BOSS.bandHalf);
-          const hi = Math.min(sweepX + ch, bandCenter + BOSS.bandHalf);
-          const overlap = Math.max(0, hi - lo);
-          const overlapFrac = ch > 0 ? overlap / (2 * ch) : 0;
-          const hitScale = attackKind === 'slam' ? BOSS.slamHitScale : 1;
+          let standX;
+          let overlapFrac;
+          let hitScale;
+          if (attackKind === 'crossfire') {
+            standX = crossfireStandX(bandCenter, best);
+            const gh = BOSS.crossfireGapHalf;
+            const inGap = Math.max(0, Math.min(standX + ch, bandCenter + gh) - Math.max(standX - ch, bandCenter - gh));
+            overlapFrac = (2 * ch - inGap) / (2 * ch);
+            hitScale = BOSS.crossfireHitScale;
+          } else {
+            standX = best ? (bandCenter < 0 ? TRACK.maxX : TRACK.minX) : 0;
+            const lo = Math.max(standX - ch, bandCenter - BOSS.bandHalf);
+            const hi = Math.min(standX + ch, bandCenter + BOSS.bandHalf);
+            const overlap = Math.max(0, hi - lo);
+            overlapFrac = ch > 0 ? overlap / (2 * ch) : 0;
+            hitScale = attackKind === 'slam' ? BOSS.slamHitScale : 1;
+          }
           out.sweeps += 1;
-          const lost = kill(Math.ceil(c * BOSS.hitFraction * hitScale * overlapFrac), `boss ${attackKind}`);
+          const dmgFrac = BOSS.hitFraction * hitScale * overlapFrac; // Boss.update's return value
+          const lost = kill(Math.ceil(c * dmgFrac), `boss ${attackKind}`);
           out.sweepLoss += lost;
           if (lost > 0) note(`boss ${attackKind}@${bandCenter.toFixed(2)} -${lost} → ${c}`);
-          prevBand = bandCenter;
+          parkX = standX;
           bossPhase = 'cooldown';
           bossTimer = lerp(BOSS.cooldown, BOSS.cooldownMin, 1 - frac);
         }
       }
-    }
-
-    // ---- pickups -----------------------------------------------------------
-    // Coins only ever pay out currency, so they cannot move the crowd rule.
-    // A crowd_pickup sits somewhere on a 6-wide track that BEST can always reach
-    // without giving up a beat, so BEST banks every one and WORST takes none.
-    for (const p of w.pickups) {
-      if (p.taken || cz < p.z) continue;
-      p.taken = true;
-      if (!best || p.kind !== 'crowd') continue;
-      if (p.x < TRACK.minX - PICKUP.halfWidth || p.x > TRACK.maxX + PICKUP.halfWidth) continue;
-      out.picked += p.value;
-      c += p.value;
-      note(`pickup@${p.z} +${p.value} → ${c}`);
     }
 
     // ---- gates -------------------------------------------------------------
@@ -486,15 +580,49 @@ function runPolicy(level, policy) {
       note(`gate@${g.z} ${chosen.op}${chosen.value} ${before}→${c}`);
     }
 
+    // GameManager.collisionSystem takes crowdHalf once, after the gates: the ram
+    // and the pickup test read that value, the blades a fresh one after any ram.
+    const stepH = crowdHalf(c);
+
     // ---- barricade contact -------------------------------------------------
     for (const b of w.barricades) {
       if (b.passed || cz < b.z) continue;
       b.passed = true;
-      if (b.alive && Math.abs(cx - b.x) <= crowdHalf(c) + b.halfWidth) {
+      if (b.alive && Math.abs(cx - b.x) <= stepH + b.halfWidth) {
         const lost = kill(Math.ceil(b.hp * RAM_FACTOR), `barricade@${b.z}`);
         note(`rammed barricade@${b.z} -${lost} → ${c}`);
       }
       b.alive = false;
+    }
+
+    // ---- blades ------------------------------------------------------------
+    // One cut on the first step the centroid reaches the saw's plane: the share
+    // of the formation's width under the saw, at the saw's current x.
+    for (const bl of w.blades) {
+      if (bl.passed || cz < bl.z) continue;
+      bl.passed = true;
+      const h = crowdHalf(c);
+      const frac = bladeOverlap(cx, h, bl.x, bl.width) / (2 * h);
+      const lost = kill(frac > 0 ? Math.ceil(c * bl.kill * frac) : 0, `blade@${bl.z}`);
+      note(`blade@${bl.z} -${lost} → ${c}`);
+    }
+
+    // ---- pickups -----------------------------------------------------------
+    // Coins only ever pay out currency, so they cannot move the crowd rule.
+    // A static crowd_pickup sits somewhere on a 6-wide track that BEST can always
+    // reach without giving up a beat, so BEST banks every one and WORST takes none.
+    // A swaying one BEST steers to intercept, so it gets GameManager's real
+    // collect test against its current x.
+    for (const p of w.pickups) {
+      if (p.taken || cz < p.z) continue;
+      p.taken = true;
+      if (!best || p.kind !== 'crowd') continue;
+      if (p.amp !== 0) {
+        if (Math.abs(cx - p.x) > stepH + PICKUP.halfWidth) { note(`missed pickup@${p.z}`); continue; }
+      } else if (p.x < TRACK.minX - PICKUP.halfWidth || p.x > TRACK.maxX + PICKUP.halfWidth) continue;
+      out.picked += p.value;
+      c += p.value;
+      note(`pickup@${p.z} +${p.value} → ${c}`);
     }
 
     // ---- end states --------------------------------------------------------
@@ -516,7 +644,9 @@ function runPolicy(level, policy) {
 }
 
 // ---------------------------------------------------------------- report
-const LEVEL_DIR = join(ROOT, 'public', 'levels');
+const LEVEL_DIR = process.env.BALANCE_LEVEL_DIR
+  ? resolve(process.env.BALANCE_LEVEL_DIR)
+  : join(ROOT, 'public', 'levels');
 
 /** Manifest order (what the game plays); a sorted directory scan if there is no manifest. */
 function listLevels() {
@@ -531,14 +661,28 @@ function listLevels() {
   if (manifest) console.warn(`index.json has no usable "levels" list; scanning ${LEVEL_DIR}`);
   return readdirSync(LEVEL_DIR).filter((f) => /^level_\d+\.json$/.test(f)).sort();
 }
-const levelFiles = listLevels();
 
-const rows = [];
-const failures = [];
-const traces = [];
+/**
+ * LevelRepository.validateLevel, which the game runs on every level file and on each
+ * day's generated level before it shows the daily card: a level it rejects never
+ * plays, so a throw is a failure, and so is a soft warning (nothing ships with one).
+ */
+function validationProblems(level, label) {
+  const problems = [];
+  const warn = console.warn;
+  console.warn = (...args) => problems.push(`validateLevel warns: ${args.join(' ')}`);
+  try {
+    validateLevel(level, label, cfg);
+  } catch (err) {
+    problems.push(`validateLevel: ${err.message}`);
+  } finally {
+    console.warn = warn;
+  }
+  return problems;
+}
 
-for (const file of levelFiles) {
-  const level = JSON.parse(readFileSync(join(LEVEL_DIR, file), 'utf8'));
+/** Both policies on one level, held to the §15 rule. */
+function judge(level) {
   const best = runPolicy(level, 'best');
   const worst = runPolicy(level, 'worst');
 
@@ -557,7 +701,26 @@ for (const file of levelFiles) {
     problems.push(`boss died in ${best.bossTTK.toFixed(1)}s (need ${MIN_BOSS_SECONDS}s)`);
   }
   if (!worst.death) problems.push('WORST survived to the finish');
+  return { best, worst, share, problems };
+}
 
+const ATTACKS_WIDTH = 16;
+const ATTACK_SHORT = { sweep_fire: 'sweep', crossfire: 'cross' };
+/** The boss's cycle; short names only when the full ones overflow the column. */
+function attacksLabel(list) {
+  if (!list) return '—';
+  const full = list.join('+');
+  return full.length <= ATTACKS_WIDTH ? full : list.map((a) => ATTACK_SHORT[a] ?? a).join('+');
+}
+
+const rows = [];
+const failures = [];
+const traces = [];
+
+for (const file of listLevels()) {
+  const level = JSON.parse(readFileSync(join(LEVEL_DIR, file), 'utf8'));
+  const { best, worst, share, problems } = judge(level);
+  problems.push(...validationProblems(level, file));
   rows.push({
     level: file.replace(/\.json$/, ''),
     atBoss: best.crowdAtBoss,
@@ -566,7 +729,7 @@ for (const file of levelFiles) {
     sweeps: best.sweeps,
     sweepLoss: best.sweepLoss,
     picked: best.picked,
-    attacks: best.attacks,
+    attacks: attacksLabel(best.attacks),
     worst: worst.death ? `z=${worst.death.z.toFixed(0)} ${worst.death.cause}` : 'survives',
     verdict: problems.length === 0 ? 'PASS' : 'FAIL',
   });
@@ -574,12 +737,81 @@ for (const file of levelFiles) {
   if (problems.length) failures.push(`${file}: ${problems.join('; ')}`);
 }
 
+// ---------------------------------------------------------------- daily sweep
+const GENERATOR = join(ROOT, 'src', 'data', 'LevelGenerator.ts');
+const CHUNKS = join(ROOT, 'public', 'levels', 'chunks.json');
+const DAILY_FIRST = '2026-10-19'; // a Monday, so the sweep is 26 whole weeks
+const DAILY_DAYS = 182;
+const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+const pad2 = (n) => String(n).padStart(2, '0');
+const newStats = () => ({ days: 0, pass: 0, atMin: Infinity, atMax: -Infinity, shareMin: Infinity, ttkMin: Infinity });
+function addStats(s, r) {
+  s.days += 1;
+  if (r.problems.length === 0) s.pass += 1;
+  s.atMin = Math.min(s.atMin, r.best.crowdAtBoss);
+  s.atMax = Math.max(s.atMax, r.best.crowdAtBoss);
+  if (r.best.bossKilled) {
+    s.shareMin = Math.min(s.shareMin, r.share);
+    s.ttkMin = Math.min(s.ttkMin, r.best.bossTTK);
+  }
+}
+
+/**
+ * Every day's generated level from DAILY_FIRST on, judged like an authored one.
+ * Null when the generator or the chunk library is not in the tree yet.
+ */
+async function dailySweep() {
+  if (!existsSync(GENERATOR) || !existsSync(CHUNKS)) return null;
+  const res = { buckets: WEEKDAYS.map(newStats), total: newStats(), fails: [] };
+  let gen;
+  let lib;
+  try {
+    gen = await import(pathToFileURL(GENERATOR).href);
+    lib = JSON.parse(readFileSync(CHUNKS, 'utf8'));
+    if (typeof gen.generateDaily !== 'function') throw new Error('it exports no generateDaily');
+  } catch (err) {
+    res.fails.push(`daily: cannot load the generator or chunks.json (${err.message})`);
+    return res;
+  }
+  const libBefore = JSON.stringify(lib);
+  const [y, m, d] = DAILY_FIRST.split('-').map(Number);
+  for (let i = 0; i < DAILY_DAYS; i++) {
+    // UTC calendar arithmetic: the keys must not depend on the machine's timezone
+    const day = new Date(Date.UTC(y, m - 1, d + i));
+    const key = `${day.getUTCFullYear()}-${pad2(day.getUTCMonth() + 1)}-${pad2(day.getUTCDate())}`;
+    const difficulty = ((day.getUTCDay() + 6) % 7) + 1; // Monday 1 ... Sunday 7
+    let r;
+    try {
+      const level = gen.generateDaily(key, lib, cfg);
+      const invalid = validationProblems(level, `daily ${key}`);
+      r = judge(level);
+      r.problems.push(...invalid);
+      if (JSON.stringify(gen.generateDaily(key, lib, cfg)) !== JSON.stringify(level)) {
+        r.problems.push('generateDaily is not deterministic for this key');
+      }
+    } catch (err) {
+      r = { best: { crowdAtBoss: 0, bossKilled: false }, share: 0, problems: [`generating or replaying it threw: ${err.message}`] };
+    }
+    if (typeof gen.dailyDifficulty === 'function' && gen.dailyDifficulty(key) !== difficulty) {
+      r.problems.push(`dailyDifficulty gives ${gen.dailyDifficulty(key)}, the calendar ${difficulty}`);
+    }
+    addStats(res.buckets[difficulty - 1], r);
+    addStats(res.total, r);
+    if (r.problems.length) res.fails.push(`daily ${key} (difficulty ${difficulty}): ${r.problems.join('; ')}`);
+  }
+  if (JSON.stringify(lib) !== libBefore) res.fails.push('daily: generateDaily mutated the chunk library');
+  return res;
+}
+const daily = await dailySweep();
+
+// ---------------------------------------------------------------- print
 const cols = [
   ['level', 'level', 11],
   ['best@boss', 'atBoss', 9],
   ['boss TTK', 'ttk', 8],
   ['survivors', 'survivors', 9],
-  ['attacks', 'attacks', 16],
+  ['attacks', 'attacks', ATTACKS_WIDTH],
   ['hits', 'sweeps', 5],
   ['lost', 'sweepLoss', 5],
   ['picked', 'picked', 6],
@@ -587,15 +819,43 @@ const cols = [
   ['', 'verdict', 4],
 ];
 const line = (cells) => cells.map(([v, wdt]) => String(v).padEnd(wdt)).join('  ');
+const table = (columns, records) => {
+  console.log(line(columns.map((c) => [c[0], c[2]])));
+  console.log(line(columns.map((c) => ['-'.repeat(c[2]), c[2]])));
+  for (const r of records) console.log(line(columns.map((c) => [r[c[1]], c[2]])));
+};
 console.log('\n§15 balance — BEST (every good gate) vs WORST (every bad gate)');
 console.log('attacks = the kinds the level\'s boss cycles; hits/lost = boss attacks the BEST');
 console.log('path faced and the units they cost it; picked = units banked from crowd pickups\n');
-console.log(line(cols.map((c) => [c[0], c[2]])));
-console.log(line(cols.map((c) => ['-'.repeat(c[2]), c[2]])));
-for (const r of rows) console.log(line(cols.map((c) => [r[c[1]], c[2]])));
+table(cols, rows);
 
 console.log('\nBEST path:');
 for (const tr of traces) console.log(`  ${tr.level}: ${tr.best.trace.join(' | ')} → finish with ${tr.best.finalCount}`);
+
+if (daily) {
+  const fmt = (label, s) => ({
+    label,
+    days: s.days,
+    pass: s.pass,
+    atBoss: s.days > 0 ? `${s.atMin}-${s.atMax}` : '—',
+    share: s.shareMin < Infinity ? `${(s.shareMin * 100).toFixed(0)}%` : '—',
+    ttk: s.ttkMin < Infinity ? `${s.ttkMin.toFixed(1)}s` : '—',
+  });
+  const dailyRows = daily.buckets.map((s, i) => fmt(`${i + 1} (${WEEKDAYS[i]})`, s));
+  dailyRows.push(fmt('total', daily.total));
+  console.log(`\nDaily challenge — ${DAILY_DAYS} days from ${DAILY_FIRST}, each generated level held to the same rule\n`);
+  table([
+    ['difficulty', 'label', 10],
+    ['days', 'days', 4],
+    ['pass', 'pass', 4],
+    ['best@boss', 'atBoss', 11],
+    ['min survivors', 'share', 13],
+    ['min boss TTK', 'ttk', 12],
+  ], dailyRows);
+  failures.push(...daily.fails);
+} else {
+  console.log('\ndaily: skipped (no generator)');
+}
 
 if (failures.length) {
   console.log('\nFAILURES:');
